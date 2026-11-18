@@ -4,6 +4,7 @@
   "private": true,
   "type": "module",
   "description": "Translate the page you're reading on-device.",
+  "license": "MIT",
   "engines": {
     "node": ">=22"
   },

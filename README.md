@@ -1,28 +1,44 @@
 # In-Page Translator
 
-Translate text as it enters the viewport, including inside scrollable panels and same-origin frames. Previously viewed text stays translated when you scroll away. **Show original** restores the text without reloading the page.
+Translate web pages in place in Chrome and Helium. The extension translates text as it comes into view and keeps it translated as you scroll. **Show original** restores the text without reloading the page.
 
-## Install in Chrome or Helium
+## Install
 
-1. Open `chrome://extensions` or `helium://extensions` and enable **Developer mode**.
-2. Click **Load unpacked** and select this project’s `dist` directory. If you cloned the source, run `npm ci` and `npm run build` first.
-3. Open a web page and click the extension. Choose **From** and **To**. **From** can use the page’s declaration or the browser’s language detection.
-4. Click **Get language packs** when a pair is missing, then **Download packs**. Use **Back to page** and reopen the extension to click **Translate page**. Installed pairs work offline.
+Use desktop Chrome 138 or later, or a compatible Chromium-based browser such as Helium. The ZIP is ready to load. No build tools or account required.
 
-The pack manager displays the download and disk sizes and lets you remove installed packs. A new installation starts with an empty pack list. When there is no direct model, supported pairs can translate through English and reuse the two installed packs.
+1. [Download the latest extension ZIP](https://github.com/mhdsdt/in-page-translator/releases/latest/download/in-page-translator.zip) and extract it to a folder you can keep.
+2. Open `chrome://extensions` (or `helium://extensions` in Helium) and turn on **Developer mode**.
+3. Click **Load unpacked** and select the extracted folder that contains `manifest.json`.
+4. Open a web page and choose **In-Page Translator** from your browser’s Extensions menu. You can pin it to the toolbar there.
+
+To update, download the latest ZIP, replace the contents of the installed folder, and click **Reload** on the extension card. Using the same folder keeps your downloaded packs. Updates are manual.
+
+## Translate a page
+
+1. Open **In-Page Translator** and choose **From** and **To**. The extension can detect the source language.
+2. If prompted, click **Get language packs**, then **Download packs**. When the download finishes, click **Back to page** and reopen the extension.
+3. Click **Translate page**. Select **Show original** to restore the page.
+
+The first download for a language pair needs an internet connection. Installed pairs work offline. Open **Packs** to see available languages, check download and disk sizes, and remove packs. When a direct model is unavailable, the extension can use two available packs to translate through English.
 
 ## Coverage and privacy
 
 - The extension preserves editable content, form values, code, and translation opt-outs. Eligible labels are translated with their visible element. Visibility uses viewport clipping and CSS visibility, including inside same-origin frames. Open shadow roots can be discovered after the initial scan. A partially visible text node is translated as a unit.
 - Cross-origin frames, closed shadow roots, and text baked into images or canvas are outside its reach. Browser-internal pages and the Chrome Web Store restrict extension access. File pages require file access in the extension’s settings.
-- Only pack files are downloaded from Mozilla’s public model bucket. Page text stays on the device. Original text for restoration stays in the page script’s memory. Downloaded packs live in the extension’s IndexedDB storage and the extension remembers the last target language.
+- The extension contacts Mozilla’s public model bucket when you download a pack. Page text stays on your device. Original text for restoration stays in the page script’s memory. Downloaded packs live in the extension’s IndexedDB storage and the extension remembers the last target language.
 
 ## Development
 
-Use Node.js 22 or later.
+Use Node.js 22 or later to build from source.
 
 ```sh
 npm ci
+npm run build
+```
+
+Load the resulting `dist` folder using the steps above. To run the test suites, install Playwright’s Chromium first.
+
+```sh
 npx playwright install chromium
 npm run check
 npm run test:packs
@@ -33,3 +49,11 @@ npm run test:packs
 `npm run models:refresh` explicitly updates the pinned catalog from Mozilla’s released desktop models. Builds use that checked-in catalog. Model files are fetched only when a pack is installed, and each download’s length and decoded file’s SHA-256 digest are checked against the catalog. See [third-party notices](static/THIRD-PARTY-NOTICES.md).
 
 The isolated page script discovers and patches text. The popup owns tab controls and the manager owns pack selection. The offscreen extension document coordinates downloads and IndexedDB, and runs Bergamot inference in a worker. Inference work is batched by route. The worker holds the active route’s models and releases them after two idle minutes.
+
+## Contribute
+
+Bug reports and pull requests are welcome. For a bug report, include the browser and extension versions, the language pair, and the steps to reproduce it. Use a public example page or sample text. [Open an issue](https://github.com/mhdsdt/in-page-translator/issues/new).
+
+## License
+
+The extension’s original code and assets are under the [MIT License](LICENSE). Bergamot and the downloadable Mozilla models are under [MPL 2.0](static/MPL-2.0.txt). See the [third-party notices](static/THIRD-PARTY-NOTICES.md) for source links.

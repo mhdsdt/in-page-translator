@@ -26,5 +26,6 @@ await cp(new URL('../static/', import.meta.url), dist, {
   recursive: true,
   filter: source => !source.endsWith('/.DS_Store'),
 });
+await cp(new URL('../LICENSE', import.meta.url), new URL('LICENSE', dist));
 await cp(new URL('../node_modules/@mkljczk/bergamot-translator/worker/', import.meta.url),
   new URL('bergamot/', dist), { recursive: true });
