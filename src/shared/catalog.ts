@@ -23,3 +23,9 @@ export function packKey(pack: Pack): string {
 export function packBytes(pack: Pack, field: 'size' | 'bytes'): number {
   return pack.assets.reduce((total, asset) => total + asset[field], 0);
 }
+
+const sizeFormatter = new Intl.NumberFormat('en', { maximumFractionDigits: 1 });
+
+export function formatSize(bytes: number): string {
+  return sizeFormatter.format(bytes / 2 ** 20) + ' MiB';
+}

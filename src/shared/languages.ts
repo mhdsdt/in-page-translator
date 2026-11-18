@@ -32,6 +32,10 @@ export function languageName(code: string): string {
   return names.of(code) ?? code;
 }
 
+export function pairName(id: string): string {
+  return id.split(':').map(languageName).join(' \u2192 ');
+}
+
 export function fillLanguages(select: HTMLSelectElement, codes: string[]): void {
   const options = codes.map(code => new Option(languageName(code), code));
   options.sort((a, b) => a.text.localeCompare(b.text, 'en'));

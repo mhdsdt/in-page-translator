@@ -1,14 +1,32 @@
-import { inputs, outputs, routeFor } from '../shared/catalog';
+import { formatSize, inputs, outputs, packBytes, routeFor } from '../shared/catalog';
+import type { Pack } from '../shared/catalog';
 import { catalogLanguage, fillLanguages, languageName, normalizeLanguage } from '../shared/languages';
 import { engineRequest, requestEngine } from '../shared/offline';
-import type { PageError, PageRequest, PageState } from '../shared/protocol';
+import { packSelectionKey } from '../shared/protocol';
+import type { PackSelection, PageError, PageRequest, PageState } from '../shared/protocol';
 
 const source = document.querySelector<HTMLSelectElement>('#source')!;
 const target = document.querySelector<HTMLSelectElement>('#target')!;
 const form = document.querySelector<HTMLFormElement>('#translation')!;
 const action = document.querySelector<HTMLButtonElement>('#action')!;
+const actionLabel = action.querySelector<HTMLSpanElement>('.action-label')!;
+const actionIcon = action.querySelector<SVGUseElement>('use')!;
 const status = document.querySelector<HTMLParagraphElement>('#status')!;
+const panel = document.querySelector<HTMLDivElement>('#status-panel')!;
+const readiness = document.querySelector<HTMLParagraphElement>('#readiness')!;
+const site = document.querySelector<HTMLParagraphElement>('#site')!;
 const languagePacks = document.querySelector<HTMLButtonElement>('#language-packs')!;
+
+type Tone = 'idle' | 'busy' | 'success' | 'warn' | 'error' | 'off';
+type ActionKind = 'translate' | 'packs' | 'retry' | 'cancel' | 'restore';
+
+const actionIcons: Record<ActionKind, string> = {
+  translate: '#i-arrow-right',
+  packs: '#i-download',
+  retry: '#i-retry',
+  cancel: '#i-stop',
+  restore: '#i-undo',
+};
 
 const errors: Record<PageError, string> = {
   'language-unknown': 'Choose the page’s original language in From.',
@@ -32,6 +50,8 @@ let sending = false;
 let warmedPair: string | undefined;
 let installed: Set<string> | undefined;
 let packRefresh: Promise<void> | undefined;
+let resumedSelection = false;
+let openingPacks = false;
 
 source.add(new Option('Detect automatically', 'auto'));
 fillLanguages(source, inputs);
@@ -52,15 +72,24 @@ for (const select of [source, target]) {
 
 languagePacks.addEventListener('click', () => { void openPacks(); });
 
-async function openPacks(): Promise<void> {
+async function openPacks(forDownload = false): Promise<void> {
+  if (openingPacks) return;
+  openingPacks = true;
   const url = new URL(chrome.runtime.getURL('packs.html'));
   const from = selectedSource();
   if (from) url.searchParams.set('from', from);
   if (target.value) url.searchParams.set('to', target.value);
+  if (address && forDownload) {
+    url.searchParams.set('tab', String(address.tabId));
+    const packSelection: PackSelection = { documentId: address.documentId, source: sourceSelection, target: target.value };
+    await chrome.storage.session.set({ [packSelectionKey(address.tabId)]: packSelection }).catch(() => {});
+  }
   try {
     await chrome.tabs.create({ url: url.href });
   } catch {
-    updateStatus('Couldn’t open the language pack manager.', true);
+    updateStatus('Couldn’t open the language pack manager.', 'error');
+  } finally {
+    openingPacks = false;
   }
 }
 
@@ -68,6 +97,16 @@ function selectedSource(): string | undefined {
   return sourceSelection === 'auto'
     ? catalogLanguage(state?.declared ?? detected, inputs)
     : sourceSelection;
+}
+
+function describePage(url: string | undefined): string {
+  if (!url) return 'Current page';
+  try {
+    const { protocol, hostname, pathname } = new URL(url);
+    if (protocol === 'file:') return decodeURIComponent(pathname.split('/').pop() || 'Local file');
+    if (/^https?:$/u.test(protocol)) return hostname.replace(/^www\./u, '');
+  } catch {}
+  return 'Browser page';
 }
 
 void connect();
@@ -81,24 +120,32 @@ async function connect(): Promise<void> {
     ]);
     const saved = (preferences as { targetLanguage?: string }).targetLanguage;
     target.value = catalogLanguage(saved, outputs) ?? target.value;
+    site.textContent = describePage(tab?.url);
     if (tab?.id === undefined || !/^(https?|file):/u.test(tab.url ?? '')) {
-      unavailable('Chrome restricts translation on this page.');
+      unavailable('Chrome restricts translation on this page. Try a web page in another tab.', 'off');
       return;
     }
-    const [injection] = await chrome.scripting.executeScript({
-      target: { tabId: tab.id },
-      files: ['page.js'],
-    });
+    const key = packSelectionKey(tab.id);
+    const [[injection], session] = await Promise.all([
+      chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ['page.js'] }),
+      chrome.storage.session.get<Record<string, PackSelection | undefined>>(key).catch(() => undefined),
+    ]);
     if (!injection?.documentId) throw new Error('Missing document ID');
     address = { tabId: tab.id, documentId: injection.documentId };
     state = await send({ type: 'status' });
-    if (state.phase === 'error' && state.source && state.target) {
+    const selection = session?.[key];
+    if (selection?.documentId === address.documentId && canStart(state)) {
+      resumedSelection = true;
+      sourceSelection = inputs.includes(selection.source) ? selection.source : 'auto';
+      if (outputs.includes(selection.target)) target.value = selection.target;
+      if (state.phase === 'error') state = { ...state, phase: 'original', error: undefined };
+    } else if (state.phase === 'error' && state.source && state.target) {
       sourceSelection = inputs.includes(state.source) ? state.source : 'auto';
       if (outputs.includes(state.target)) target.value = state.target;
     }
     render();
   } catch {
-    unavailable('Chrome couldn’t open this page for translation.');
+    unavailable('Chrome couldn’t open this page for translation.', 'error');
   }
 }
 
@@ -148,14 +195,14 @@ function send(request: PageRequest): Promise<PageState> {
 }
 
 async function submit(): Promise<void> {
-  if (!state || action.disabled) return;
+  if (!state || action.disabled || openingPacks) return;
   const desiredTarget = target.value;
   if (!desiredTarget) return;
   const starting = canStart(state);
   const from = selectedSource();
   if (starting && from && needsPacks(from, desiredTarget)) {
     void chrome.storage.local.set({ targetLanguage: desiredTarget }).catch(() => {});
-    await openPacks();
+    await openPacks(true);
     return;
   }
   sending = true;
@@ -165,10 +212,14 @@ async function submit(): Promise<void> {
     accept(await send(starting
       ? { type: 'start', source: from, target: desiredTarget }
       : { type: 'restore' }));
-    if (starting) void chrome.storage.local.set({ targetLanguage: desiredTarget }).catch(() => {});
+    if (starting) {
+      void chrome.storage.local.set({ targetLanguage: desiredTarget }).catch(() => {});
+      if (resumedSelection && address) void chrome.storage.session.remove(packSelectionKey(address.tabId)).catch(() => {});
+      resumedSelection = false;
+    }
     schedulePoll();
   } catch {
-    unavailable('Page changed. Reopen the extension to try again.');
+    unavailable('Page changed. Reopen the extension to try again.', 'warn');
   } finally {
     sending = false;
     render();
@@ -195,7 +246,7 @@ async function poll(): Promise<void> {
     accept(next);
     render();
   } catch {
-    if (state === before && !sending) unavailable('Page changed. Reopen the extension to try again.');
+    if (state === before && !sending) unavailable('Page changed. Reopen the extension to try again.', 'warn');
   }
 }
 
@@ -203,12 +254,13 @@ function canStart(page: PageState): boolean {
   return page.phase === 'original' || page.phase === 'error';
 }
 
-function unavailable(message: string): void {
+function unavailable(message: string, tone: Tone): void {
   address = undefined;
   state = undefined;
   cancelPoll();
   source.disabled = target.disabled = action.disabled = true;
-  updateStatus(message, true);
+  readiness.hidden = true;
+  updateStatus(message, tone);
 }
 
 function render(): void {
@@ -229,6 +281,8 @@ function render(): void {
   const route = from ? routeFor(from, to) : [];
   const missing = starting && Boolean(from && needsPacks(from, to));
   const invalid = starting && from && !route.length;
+  const unknown = starting && !from;
+  const checking = starting && route.length > 0 && !installed && packRefresh !== undefined;
   if (starting && installed && from && route.length && !missing && warmedPair !== from + ':' + to) {
     warmedPair = from + ':' + to;
     void requestEngine({ type: 'engine-prepare', from, to }).catch(() => {});
@@ -236,34 +290,56 @@ function render(): void {
 
   source.disabled = target.disabled = sending || !starting;
   const detecting = starting && sourceSelection === 'auto' && !page.declared && detection === 'pending';
-  action.disabled = sending || page.phase === 'restoring' || detecting || Boolean(invalid);
+  action.disabled = sending || page.phase === 'restoring' || detecting || checking || Boolean(invalid) || unknown;
   const pending = page.phase === 'preparing' || page.phase === 'translating';
-  const label = missing ? 'Get language packs' : retry ? 'Retry translation'
-    : starting ? 'Translate page' : pending ? 'Cancel and restore' : 'Show original';
-  setAction(label, starting ? '→' : '↶');
+  if (missing) setAction('packs', 'Get language packs');
+  else if (retry) setAction('retry', 'Retry translation');
+  else if (starting) setAction('translate', 'Translate page');
+  else if (pending) setAction('cancel', 'Cancel and restore');
+  else setAction('restore', 'Show original');
+
   const message = detecting ? 'Detecting page language…'
     : invalid ? errors[from === to ? 'same-language' : 'unsupported-pair']
+    : checking ? 'Checking installed language packs…'
     : missing ? errors['missing-packs']
+    : unknown ? errors['language-unknown']
     : page.error === 'missing-packs' && installed ? 'Page is in its original language.'
     : statusMessage(page);
 
-  updateStatus(message, Boolean(invalid) ||
-    (page.phase === 'error' && (missing || page.error !== 'missing-packs')) || page.failed > 0);
+  const busy = sending || detecting || checking || pending || page.phase === 'restoring';
+  const failed = page.phase === 'error' && (missing || page.error !== 'missing-packs');
+  const tone: Tone = busy ? 'busy'
+    : invalid || missing || unknown || page.error === 'no-text' || page.failed > 0 ? 'warn'
+    : failed ? 'error'
+    : page.phase === 'translated' ? 'success'
+    : 'idle';
+  updateStatus(message, tone);
+  renderReadiness(starting && !detecting && route.length ? route : []);
   schedulePoll();
 }
 
-function updateStatus(message: string, error: boolean): void {
-  if (status.textContent !== message) status.textContent = message;
-  status.dataset.error = String(error);
+function renderReadiness(route: Pack[]): void {
+  readiness.hidden = !route.length || !installed;
+  if (readiness.hidden) return;
+  const needed = route.filter(pack => !installed?.has(pack.id));
+  const text = needed.length
+    ? (needed.length === 1 ? '1 pack' : needed.length + ' packs') +
+      ' · ' + formatSize(needed.reduce((bytes, pack) => bytes + packBytes(pack, 'size'), 0)) + ' download'
+    : route.length > 1 ? 'Ready offline · via English' : 'Ready offline';
+  if (readiness.textContent !== text) readiness.textContent = text;
+  readiness.dataset.tone = needed.length ? 'warn' : 'ready';
 }
 
-function setAction(label: string, icon: string): void {
-  if (action.firstChild?.textContent?.trim() !== label) {
-    const glyph = document.createElement('span');
-    glyph.setAttribute('aria-hidden', 'true');
-    glyph.textContent = icon;
-    action.replaceChildren(label, glyph);
-  }
+function updateStatus(message: string, tone: Tone): void {
+  if (status.textContent !== message) status.textContent = message;
+  panel.dataset.tone = tone;
+}
+
+function setAction(kind: ActionKind, label: string): void {
+  if (action.dataset.kind === kind && actionLabel.textContent === label) return;
+  action.dataset.kind = kind;
+  actionLabel.textContent = label;
+  actionIcon.setAttribute('href', actionIcons[kind]);
 }
 
 function statusMessage(page: PageState): string {

@@ -7,7 +7,7 @@ Translate text as it enters the viewport, including inside scrollable panels and
 1. Open `chrome://extensions` or `helium://extensions` and enable **Developer mode**.
 2. Click **Load unpacked** and select this project’s `dist` directory. If you cloned the source, run `npm ci` and `npm run build` first.
 3. Open a web page and click the extension. Choose **From** and **To**. **From** can use the page’s declaration or the browser’s language detection.
-4. Click **Get language packs** when a pair is missing, then **Download packs**. Return to the page and click **Translate page**. Installed pairs work offline.
+4. Click **Get language packs** when a pair is missing, then **Download packs**. Use **Back to page** and reopen the extension to click **Translate page**. Installed pairs work offline.
 
 The pack manager displays the download and disk sizes and lets you remove installed packs. A new installation starts with an empty pack list. When there is no direct model, supported pairs can translate through English and reuse the two installed packs.
 

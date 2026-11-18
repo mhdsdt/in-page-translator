@@ -1,119 +1,214 @@
-@import url('theme.css');
-
-* { box-sizing: border-box; }
-
 body {
-  margin: 0;
-  width: 318px;
-  background: var(--paper);
-  color: var(--ink);
-  font: 14px/1.4 "Avenir Next", "Trebuchet MS", sans-serif;
+  width: 360px;
+  background: var(--bg);
+  font-size: 13px;
+  line-height: 1.45;
 }
 
-main { padding: 19px 20px 14px; }
-
-header {
+.top {
   display: flex;
   align-items: center;
-  gap: 12px;
-  padding: 0 0 15px;
-  border-bottom: 1px solid var(--line);
+  gap: 11px;
+  padding: 16px;
+  border-bottom: 1px solid var(--brand-line);
+  background: var(--brand);
+  color: var(--brand-text);
 }
 
-header img { border-radius: 11px; }
+.identity { flex: 1; min-width: 0; }
 
 h1 {
   margin: 0;
-  font: 600 28px/.94 Georgia, serif;
-  letter-spacing: -.045em;
+  font: 400 19px/1.1 var(--font-display);
+  letter-spacing: -.025em;
 }
 
-.languages {
-  display: grid;
-  grid-template-columns: 42px minmax(0, 1fr);
-  align-items: center;
-  gap: 8px;
-  padding-top: 14px;
+#site {
+  margin: 3px 0 0;
+  overflow: hidden;
+  color: var(--brand-muted);
+  font: 11px/1.3 var(--font-meta);
+  white-space: nowrap;
+  text-overflow: ellipsis;
 }
 
-label {
-  font-weight: 650;
-  color: var(--muted);
-}
-
-select, button {
-  width: 100%;
-  min-height: 39px;
-  border-radius: 6px;
-  font: inherit;
-}
-
-select {
-  padding: 4px 8px;
-  border: 1px solid var(--line);
-  background: var(--field);
-  color: var(--ink);
-}
-
-select:disabled { opacity: .72; }
-
-.status {
-  min-height: 57px;
-  padding: 8px 0;
-  display: grid;
-  align-content: center;
+.packs-link {
+  min-height: 34px;
   gap: 5px;
-}
-
-.status p {
-  margin: 0;
-  color: var(--muted);
+  padding: 0 8px;
+  border-color: var(--brand-line);
+  background: transparent;
+  color: var(--brand-text);
   font-size: 12px;
 }
 
-.status p[data-error="true"] { color: var(--error); }
+.packs-link:hover { background: var(--brand-line); }
+.packs-link:focus-visible { outline-color: var(--lime); }
+.packs-link .icon { width: 14px; height: 14px; color: var(--lime); }
 
-button {
-  display: flex;
+form { padding: 16px 16px 0; }
+
+.route {
+  position: relative;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  background: var(--surface);
+  box-shadow: var(--shadow-sm);
+}
+
+.lane {
+  display: grid;
+  grid-template-columns: 34px 1fr;
   align-items: center;
+  gap: 12px;
+  min-height: 56px;
+  padding: 0 9px 0 13px;
+}
+
+.route-joint + .lane { border-top: 1px solid var(--border); }
+
+.lane .select { min-width: 0; }
+
+.lane .select select {
+  min-height: 40px;
+  border-color: transparent;
+  background: transparent;
+  font-size: 15px;
+}
+
+.lane .select select:disabled { color: var(--subtle); }
+.lane .select select:hover:not(:disabled) { background: var(--sunken); }
+.lane .select select:focus-visible { outline-offset: 0; }
+
+.route-joint {
+  position: absolute;
+  z-index: 1;
+  top: 50%;
+  left: 18px;
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  transform: translateY(-50%);
+  border: 1px solid var(--border);
+  border-radius: 50%;
+  background: var(--accent-soft);
+  color: var(--accent-ink);
+  pointer-events: none;
+}
+
+.route-joint .icon { width: 13px; height: 13px; stroke-width: 2; }
+
+.status {
+  position: relative;
+  display: grid;
+  grid-template-columns: 20px 1fr;
+  align-items: center;
+  gap: 8px;
+  min-height: 54px;
+  margin: 12px 0;
+  padding: 10px 11px;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--sunken);
+  color: var(--muted);
+}
+
+.status p { margin: 0; font-weight: 500; }
+
+.status .readiness {
+  margin-top: 3px;
+  color: var(--success);
+  font: 500 11px/1.3 var(--font-meta);
+}
+
+.status .readiness[data-tone="warn"] { color: var(--warn); }
+
+.status-icon {
+  display: grid;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+}
+
+.status-icon > * { display: none; grid-area: 1 / 1; }
+.status-icon .icon { width: 18px; height: 18px; stroke-width: 2; }
+
+.tone-idle {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--subtle);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--subtle) 18%, transparent);
+}
+
+.status[data-tone="idle"] .tone-idle,
+.status[data-tone="busy"] .spinner,
+.status[data-tone="success"] .tone-success,
+.status[data-tone="warn"] .tone-alert,
+.status[data-tone="error"] .tone-alert,
+.status[data-tone="off"] .tone-off { display: block; }
+
+.status[data-tone="busy"] { background: var(--accent-soft); color: var(--accent-ink); }
+.status[data-tone="success"] { background: var(--success-soft); color: var(--success); }
+.status[data-tone="warn"] { background: var(--warn-soft); color: var(--warn); }
+.status[data-tone="error"] { background: var(--danger-soft); color: var(--danger); }
+
+.meter {
+  display: none;
+  position: absolute;
+  inset: auto 0 0;
+  height: 2px;
+  overflow: hidden;
+}
+
+.meter::before {
+  content: "";
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 40%;
+  background: currentColor;
+  animation: sweep 1.3s var(--ease) infinite;
+}
+
+.status[data-tone="busy"] .meter { display: block; }
+
+@keyframes sweep {
+  from { transform: translateX(-100%); }
+  to { transform: translateX(250%); }
+}
+
+.action {
+  width: 100%;
+  min-height: 44px;
   justify-content: space-between;
-  gap: 10px;
-  padding: 6px 12px;
-  background: var(--action);
-  border: 1px solid var(--action);
-  color: var(--action-ink);
-  font-weight: 680;
-  cursor: pointer;
+  padding: 0 12px 0 14px;
+  font-size: 14px;
 }
 
-button:hover:not(:disabled) { background: var(--action-hover); }
+.action .icon { width: 17px; height: 17px; stroke-width: 2; }
 
-button:disabled {
-  opacity: .58;
-  cursor: default;
+.action[data-kind="restore"],
+.action[data-kind="cancel"] {
+  background: var(--surface);
+  border-color: var(--border-strong);
+  color: var(--text);
 }
 
-button span { font-size: 17px; }
-
-button:focus-visible, select:focus-visible {
-  outline: 2px solid var(--focus);
-  outline-offset: 3px;
+.action[data-kind="restore"]:hover:not(:disabled),
+.action[data-kind="cancel"]:hover:not(:disabled) {
+  background: var(--sunken);
 }
 
 footer {
-  margin-top: 11px;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  gap: 6px;
+  padding: 12px 16px 14px;
   color: var(--muted);
-  font-size: 11px;
+  font-size: 11.5px;
 }
 
-#language-packs {
-  width: auto;
-  min-height: 32px;
-  margin-bottom: 6px;
-  padding: 0;
-  border: 0;
-  background: transparent;
-  color: var(--ink);
-  text-decoration: underline;
-  text-underline-offset: 3px;
-}
+footer .icon { width: 14px; height: 14px; }

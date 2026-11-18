@@ -18,3 +18,13 @@ export type PageRequest =
   | { type: 'status' }
   | { type: 'start'; source?: string; target: string }
   | { type: 'restore' };
+
+export interface PackSelection {
+  documentId: string;
+  source: string;
+  target: string;
+}
+
+export function packSelectionKey(tabId: number): string {
+  return 'packSelection:' + tabId;
+}

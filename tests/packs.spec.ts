@@ -11,6 +11,7 @@ test('installs verified Mozilla packs, reuses them locally, pivots, and removes 
     </body></html>`));
     const original = await openPopup();
     await expect.poll(original.status).toBe('Install the language packs for this pair first.');
+    await original.choose('source', 'de');
     const managerPage = page.context().waitForEvent('page');
     await original.click();
     const manager = await managerPage;
@@ -24,9 +25,11 @@ test('installs verified Mozilla packs, reuses them locally, pivots, and removes 
     // Closing the inference context proves the pack is read back from disk.
     await manager.evaluate(() => chrome.offscreen.closeDocument());
     await page.context().setOffline(true);
-    await page.bringToFront();
+    await manager.getByRole('button', { name: 'Back to page' }).click();
+    await expect.poll(() => page.evaluate(() => document.visibilityState)).toBe('visible');
     const popup = await openPopup();
     await expect.poll(popup.status).toBe('Page is in its original language.');
+    expect(await popup.evaluate('document.querySelector("#source").value')).toBe('de');
     const start = performance.now();
     await popup.click();
     await page.waitForFunction(() => /good morning/i.test(document.querySelector('h1')?.textContent ?? ''),
@@ -44,8 +47,10 @@ test('installs verified Mozilla packs, reuses them locally, pivots, and removes 
 
     await manager.bringToFront();
     await manager.locator('#to').selectOption('fr');
-    await expect(manager.locator('#requirements')).toContainText('English → French');
-    await expect(manager.locator('#requirements')).not.toContainText('German → English');
+    await expect(manager.locator('#route-summary')).toContainText('through English');
+    await expect(manager.locator('#route li[data-installed=true]')).toContainText('German → English');
+    await expect(manager.locator('#route li[data-installed=false]')).toContainText('English → French');
+    await expect(manager.locator('#requirements')).toContainText('1 pack to download');
     await installSelected(manager);
     await expect(manager.getByRole('button', { name: 'Remove English → French' })).toBeVisible();
 
@@ -64,7 +69,8 @@ test('installs verified Mozilla packs, reuses them locally, pivots, and removes 
 
     await manager.bringToFront();
     await manager.getByRole('button', { name: 'Remove German → English' }).click();
-    await expect(manager.locator('#requirements')).toContainText('Download German → English');
+    await expect(manager.locator('#requirements')).toContainText('1 pack to download');
+    await expect(manager.locator('#route li[data-installed=false]')).toContainText('German → English');
     await expect(manager.getByRole('button', { name: 'Remove German → English' })).toHaveCount(0);
     await manager.close();
 

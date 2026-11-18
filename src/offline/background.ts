@@ -1,4 +1,5 @@
 import type { EngineRequest, EngineReply } from '../shared/offline';
+import { packSelectionKey } from '../shared/protocol';
 
 const DOCUMENT = 'offline.html';
 let opening: Promise<void> | undefined;
@@ -24,4 +25,8 @@ chrome.runtime.onMessage.addListener((request: EngineRequest, sender, reply: (re
     () => reply({ ok: false, error: 'engine-unavailable' }),
   );
   return true;
+});
+
+chrome.tabs.onRemoved.addListener(tabId => {
+  void chrome.storage.session.remove(packSelectionKey(tabId)).catch(() => {});
 });

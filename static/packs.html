@@ -4,36 +4,106 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Language packs · In-Page Translator</title>
+  <link rel="icon" href="icons/32.png">
   <link rel="stylesheet" href="theme.css">
   <link rel="stylesheet" href="packs.css">
   <script src="packs.js" defer></script>
 </head>
 <body>
-  <main>
-    <header>
-      <img src="icons/48.png" width="48" height="48" alt="">
-      <h1>Language packs</h1>
-    </header>
-    <form id="install">
-      <div class="choices">
-        <label>From <select id="from"></select></label>
-        <label>To <select id="to"></select></label>
-      </div>
-      <p id="requirements"></p>
-      <button id="download" type="submit" disabled>Download packs</button>
-    </form>
-    <section id="transfer" aria-label="Download progress" hidden>
-      <p id="transfer-label"></p>
-      <progress id="progress" aria-labelledby="transfer-label" max="1" value="0"></progress>
-      <button id="cancel" type="button">Cancel download</button>
-    </section>
-    <p id="message" role="status"></p>
+  <svg class="sprite" aria-hidden="true">
+    <symbol id="i-arrow-right" viewBox="0 0 16 16"><path d="M3 8h10M9 4l4 4-4 4"/></symbol>
+    <symbol id="i-arrow-left" viewBox="0 0 16 16"><path d="M13 8H3m4-4L3 8l4 4"/></symbol>
+    <symbol id="i-download" viewBox="0 0 16 16"><path d="M8 2.5v8M4.5 7 8 10.5 11.5 7M3 13.5h10"/></symbol>
+    <symbol id="i-check" viewBox="0 0 16 16"><path d="m3.5 8.5 3 3 6-7"/></symbol>
+    <symbol id="i-trash" viewBox="0 0 16 16"><path d="M2.75 4.25h10.5M6.25 4.25V2.75h3.5v1.5M4 4.25l.6 8.6a1.25 1.25 0 0 0 1.25 1.15h4.3a1.25 1.25 0 0 0 1.25-1.15l.6-8.6"/></symbol>
+    <symbol id="i-packs" viewBox="0 0 16 16"><path d="M8 1.75 14 5 8 8.25 2 5z"/><path d="M2 8l6 3.25L14 8M2 11l6 3.25L14 11"/></symbol>
+  </svg>
 
-    <section aria-labelledby="installed-title">
-      <h2 id="installed-title">Installed packs</h2>
-      <p id="empty">No language packs installed.</p>
-      <ul id="installed"></ul>
-    </section>
-  </main>
+  <div class="shell">
+    <header class="masthead">
+      <div class="brand">
+        <img class="mark" src="icons/mark.svg" width="28" height="28" alt="">
+        <span>In-Page Translator</span>
+      </div>
+      <button id="return-page" class="button button-secondary" type="button" hidden>
+        <svg class="icon" aria-hidden="true"><use href="#i-arrow-left"/></svg>
+        Back to page
+      </button>
+    </header>
+
+    <main>
+      <section class="intro" aria-labelledby="title">
+        <div>
+          <h1 id="title">Language packs</h1>
+          <p>Download the languages you need. Once installed, you can translate pages offline and keep all page text on this device.</p>
+        </div>
+        <div class="intro-art" aria-hidden="true">
+          <span class="sheet sheet-source">A</span>
+          <span class="sheet sheet-target">文</span>
+          <span class="sheet-arrow"><svg class="icon"><use href="#i-arrow-right"/></svg></span>
+        </div>
+      </section>
+
+      <p id="message" class="message" role="status" aria-atomic="true"></p>
+
+      <div class="workspace">
+        <form id="install" class="card" aria-labelledby="add-title">
+          <div class="card-head">
+            <h2 id="add-title">Add a language pair</h2>
+            <p id="route-summary">Choose the languages you want to translate between.</p>
+          </div>
+
+          <div class="pair">
+            <label class="field">
+              <span class="field-label">From</span>
+              <span class="select"><select id="from"></select></span>
+            </label>
+            <span class="pair-arrow" aria-hidden="true"><svg class="icon"><use href="#i-arrow-right"/></svg></span>
+            <label class="field">
+              <span class="field-label">To</span>
+              <span class="select"><select id="to"></select></span>
+            </label>
+          </div>
+
+          <ol id="route" class="route" aria-label="Packs used by this pair"></ol>
+
+          <div id="install-bar" class="install-bar">
+            <p id="requirements" role="status" aria-atomic="true" tabindex="-1"></p>
+            <button id="download" class="button button-primary" type="submit" disabled>
+              <svg class="icon" aria-hidden="true"><use href="#i-download"/></svg>
+              Download packs
+            </button>
+          </div>
+
+          <section id="transfer" class="transfer" aria-label="Download progress" hidden>
+            <div class="transfer-head">
+              <p id="transfer-label" role="status"></p>
+              <span id="transfer-bytes"></span>
+            </div>
+            <progress id="progress" aria-labelledby="transfer-label" max="1" value="0"></progress>
+            <button id="cancel" class="button button-secondary" type="button">Cancel download</button>
+          </section>
+        </form>
+
+        <section class="installed card" aria-labelledby="installed-title">
+          <div class="card-head">
+            <h2 id="installed-title" tabindex="-1">Installed packs</h2>
+            <p id="usage" role="status" aria-atomic="true">Checking storage…</p>
+          </div>
+          <div id="empty" class="empty" hidden>
+            <span class="empty-art" aria-hidden="true"><svg class="icon"><use href="#i-packs"/></svg></span>
+            <p class="empty-title">No language packs installed</p>
+            <p>Add a pair to start translating offline.</p>
+          </div>
+          <ul id="installed" class="pack-list"></ul>
+        </section>
+      </div>
+    </main>
+
+    <footer>
+      Translation models by Mozilla, run locally with Bergamot.
+      <a href="THIRD-PARTY-NOTICES.md" target="_blank">Third-party notices</a>
+    </footer>
+  </div>
 </body>
 </html>

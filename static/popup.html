@@ -4,30 +4,75 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>In-Page Translator</title>
+  <link rel="stylesheet" href="theme.css">
   <link rel="stylesheet" href="popup.css">
   <script src="popup.js" defer></script>
 </head>
 <body>
+  <svg class="sprite" aria-hidden="true">
+    <symbol id="i-arrow-right" viewBox="0 0 16 16"><path d="M3 8h10M9 4l4 4-4 4"/></symbol>
+    <symbol id="i-arrow-down" viewBox="0 0 16 16"><path d="M8 3v10M4 9l4 4 4-4"/></symbol>
+    <symbol id="i-undo" viewBox="0 0 16 16"><path d="M5.5 3.5 2.5 6.5l3 3"/><path d="M2.5 6.5h7a4 4 0 0 1 0 8H7"/></symbol>
+    <symbol id="i-stop" viewBox="0 0 16 16"><path d="M4 4l8 8M12 4l-8 8"/></symbol>
+    <symbol id="i-retry" viewBox="0 0 16 16"><path d="M13.5 8a5.5 5.5 0 1 1-1.6-3.9"/><path d="M13.5 2.5v3h-3"/></symbol>
+    <symbol id="i-download" viewBox="0 0 16 16"><path d="M8 2.5v8M4.5 7 8 10.5 11.5 7M3 13.5h10"/></symbol>
+    <symbol id="i-packs" viewBox="0 0 16 16"><path d="M8 1.75 14 5 8 8.25 2 5z"/><path d="M2 8l6 3.25L14 8M2 11l6 3.25L14 11"/></symbol>
+    <symbol id="i-check" viewBox="0 0 16 16"><path d="m3.5 8.5 3 3 6-7"/></symbol>
+    <symbol id="i-alert" viewBox="0 0 16 16"><circle cx="8" cy="8" r="6.25"/><path d="M8 4.75v3.75M8 11.1v.15"/></symbol>
+    <symbol id="i-slash" viewBox="0 0 16 16"><circle cx="8" cy="8" r="6.25"/><path d="m3.6 12.4 8.8-8.8"/></symbol>
+    <symbol id="i-device" viewBox="0 0 16 16"><rect x="2" y="3" width="12" height="8.5" rx="1.5"/><path d="M5.5 14h5M8 11.5V14"/></symbol>
+  </svg>
+
   <main>
-    <header>
-      <img src="icons/48.png" width="46" height="46" alt="">
-      <h1>In-Page<br>Translator</h1>
+    <header class="top">
+      <img class="mark" src="icons/mark.svg" width="32" height="32" alt="">
+      <div class="identity">
+        <h1>In-Page Translator</h1>
+        <p id="site">Current page</p>
+      </div>
+      <button id="language-packs" class="button packs-link" type="button" aria-label="Manage language packs">
+        <svg class="icon" aria-hidden="true"><use href="#i-packs"/></svg>
+        Packs
+      </button>
     </header>
+
     <form id="translation">
-      <div class="languages">
-        <label for="source">From</label>
-        <select id="source" disabled></select>
-        <label for="target">To</label>
-        <select id="target" disabled></select>
+      <div class="route">
+        <label class="lane" for="source">
+          <span class="field-label">From</span>
+          <span class="select"><select id="source" disabled></select></span>
+        </label>
+        <span class="route-joint" aria-hidden="true"><svg class="icon"><use href="#i-arrow-down"/></svg></span>
+        <label class="lane" for="target">
+          <span class="field-label">To</span>
+          <span class="select"><select id="target" disabled></select></span>
+        </label>
       </div>
-      <div class="status">
-        <p id="status" role="status" aria-atomic="true">Opening current page…</p>
+
+      <div id="status-panel" class="status" data-tone="busy">
+        <span class="status-icon" aria-hidden="true">
+          <span class="spinner"></span>
+          <svg class="icon tone-success"><use href="#i-check"/></svg>
+          <svg class="icon tone-alert"><use href="#i-alert"/></svg>
+          <svg class="icon tone-off"><use href="#i-slash"/></svg>
+          <span class="tone-idle"></span>
+        </span>
+        <div class="status-copy" role="status" aria-atomic="true">
+          <p id="status">Opening current page…</p>
+          <p id="readiness" class="readiness" hidden></p>
+        </div>
+        <span class="meter" aria-hidden="true"></span>
       </div>
-      <button id="action" type="submit" disabled>Translate page <span aria-hidden="true">→</span></button>
+
+      <button id="action" class="button button-primary action" type="submit" data-kind="translate" disabled>
+        <span class="action-label">Translate page</span>
+        <svg class="icon" aria-hidden="true"><use href="#i-arrow-right"/></svg>
+      </button>
     </form>
+
     <footer>
-      <button id="language-packs" type="button">Manage language packs</button>
-      <span>Translation runs on this device.</span>
+      <svg class="icon" aria-hidden="true"><use href="#i-device"/></svg>
+      <span>Page text stays on this device.</span>
     </footer>
   </main>
 </body>
