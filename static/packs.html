@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Language packs · In-Page Translator</title>
+  <link rel="stylesheet" href="theme.css">
+  <link rel="stylesheet" href="packs.css">
+  <script src="packs.js" defer></script>
+</head>
+<body>
+  <main>
+    <header>
+      <img src="icons/48.png" width="48" height="48" alt="">
+      <h1>Language packs</h1>
+    </header>
+    <form id="install">
+      <div class="choices">
+        <label>From <select id="from"></select></label>
+        <label>To <select id="to"></select></label>
+      </div>
+      <p id="requirements"></p>
+      <button id="download" type="submit" disabled>Download packs</button>
+    </form>
+    <section id="transfer" aria-label="Download progress" hidden>
+      <p id="transfer-label"></p>
+      <progress id="progress" aria-labelledby="transfer-label" max="1" value="0"></progress>
+      <button id="cancel" type="button">Cancel download</button>
+    </section>
+    <p id="message" role="status"></p>
+
+    <section aria-labelledby="installed-title">
+      <h2 id="installed-title">Installed packs</h2>
+      <p id="empty">No language packs installed.</p>
+      <ul id="installed"></ul>
+    </section>
+  </main>
+</body>
+</html>

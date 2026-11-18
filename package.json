@@ -1,0 +1,26 @@
+{
+  "name": "in-page-translator",
+  "version": "1.3.1",
+  "private": true,
+  "type": "module",
+  "description": "Translate the page you're reading on-device.",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "typecheck": "tsc --noEmit",
+    "test": "npm run build && playwright test --project regression",
+    "check": "npm run typecheck && npm test",
+    "models:refresh": "node scripts/refresh-catalog.mjs",
+    "test:packs": "npm run build && playwright test --project packs"
+  },
+  "devDependencies": {
+    "@mkljczk/bergamot-translator": "0.4.16",
+    "@playwright/test": "1.65.1",
+    "@types/chrome": "0.3.7",
+    "@types/node": "22.19.15",
+    "esbuild": "0.28.2",
+    "typescript": "5.9.3"
+  }
+}
