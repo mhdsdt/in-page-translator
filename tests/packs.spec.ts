@@ -7,6 +7,8 @@ test('installs verified Mozilla packs directly in popup, reuses them offline, pi
   await withExtension(async ({ page, serve, openPopup }) => {
     await page.goto(serve('/', `<!doctype html><html lang="de"><body>
       <h1>Guten Morgen!</h1><p>Wo ist der Bahnhof?</p>
+      <p id="inline">Lesen Sie die <a id="guide" href="#guide">offizielle Anleitung</a> und nutzen Sie <code id="cmd">npm test</code>.</p>
+      <div id="price">ab <strong>59,00 €</strong></div>
       <div style="height:1600px"></div><p id="unseen">Vielen Dank!</p>
     </body></html>`));
 
@@ -20,11 +22,16 @@ test('installs verified Mozilla packs directly in popup, reuses them offline, pi
       .toMatch(/^Translated to English/);
     await expect(page.locator('h1')).toHaveText(/good morning/i);
     await expect(page.locator('p').first()).toHaveText(/where(?: is|'s) the (train |railway )?station/i);
+    await expect(page.locator('#cmd')).toHaveText('npm test');
+    await expect(page.locator('#guide')).toHaveAttribute('href', '#guide');
+    await expect(page.locator('#inline')).toHaveText(/official|guide|instructions/i);
+    await expect(page.locator('#price')).toHaveText(/59,00\s*€|€\s*59,00/i);
     await expect(page.locator('#unseen')).toHaveText('Vielen Dank!');
     await page.locator('#unseen').evaluate(node => node.scrollIntoView());
     await expect(page.locator('#unseen')).toHaveText(/thank you/i);
     await original.click();
     await expect(page.locator('h1')).toHaveText('Guten Morgen!');
+    await expect(page.locator('#inline')).toHaveText('Lesen Sie die offizielle Anleitung und nutzen Sie npm test.');
 
     // Open the language pack manager via the header button and verify offline reload from disk.
     const managerPage = page.context().waitForEvent('page');
@@ -71,9 +78,11 @@ test('installs verified Mozilla packs directly in popup, reuses them offline, pi
     expect(await french.evaluate('document.getElementById("target").value')).toBe('fr');
     await french.click();
     await expect(page.locator('h1')).toHaveText(/bonjour/i);
+    await expect(page.locator('#cmd')).toHaveText('npm test');
     await expect.poll(french.status).toMatch(/^Translated to French/);
     await french.click();
     await expect(page.locator('h1')).toHaveText('Guten Morgen!');
+    await expect(page.locator('#inline')).toHaveText('Lesen Sie die offizielle Anleitung und nutzen Sie npm test.');
     await french.close();
 
     // Remove pack and confirm popup offers Download & translate again.

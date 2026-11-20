@@ -12,6 +12,7 @@ export interface PageState {
   updated: number;
   failed: number;
   error?: PageError;
+  blockedFrames?: number;
 }
 
 export type PageRequest =

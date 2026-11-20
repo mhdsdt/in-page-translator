@@ -1,5 +1,5 @@
 import { packBatches } from '../shared/batch';
-import { engineRequest, OfflineError, requestEngine } from '../shared/offline';
+import { engineRequest, MAX_TRANSLATION_CHARS, OfflineError, requestEngine } from '../shared/offline';
 import type { EngineReply, Pair } from '../shared/offline';
 import { splitText } from '../shared/text';
 
@@ -9,11 +9,12 @@ const CACHE_ENTRIES = 2_048;
 const BUSY_DELAYS = [50, 150, 450] as const;
 
 interface TranslatorInstance {
-  translate(text: string, options: { signal: AbortSignal }): Promise<string>;
+  translate(text: string, options: { signal: AbortSignal; html?: boolean }): Promise<string>;
 }
 
 interface PendingItem {
   text: string;
+  html: boolean;
   signal: AbortSignal;
   resolve: (value: string) => void;
   reject: (error: unknown) => void;
@@ -41,9 +42,12 @@ export async function openEngine(pair: Pair, signal: AbortSignal): Promise<Trans
     });
     if (!active.length) return;
 
-    const texts = active.map(item => item.text);
     const send = () => requestEngine(
-      { type: 'engine-translate-batch', ...pair, texts },
+      {
+        type: 'engine-translate-batch',
+        ...pair,
+        items: active.map(({ text, html }) => ({ text, html })),
+      },
       { signal, timeoutMs: REQUEST_TIMEOUT_MS },
     );
 
@@ -87,10 +91,10 @@ export async function openEngine(pair: Pair, signal: AbortSignal): Promise<Trans
     }
   }
 
-  function enqueueOnce(text: string, reqSignal: AbortSignal): Promise<string> {
+  function enqueueOnce(text: string, html: boolean, reqSignal: AbortSignal): Promise<string> {
     reqSignal.throwIfAborted();
     return new Promise<string>((resolve, reject) => {
-      queued.push({ text, signal: reqSignal, resolve, reject });
+      queued.push({ text, html, signal: reqSignal, resolve, reject });
       if (!flushScheduled) {
         flushScheduled = true;
         queueMicrotask(flush);
@@ -99,23 +103,23 @@ export async function openEngine(pair: Pair, signal: AbortSignal): Promise<Trans
   }
 
   return {
-    async translate(text, { signal: reqSignal }) {
+    async translate(text, { signal: reqSignal, html = false }) {
       for (const delay of BUSY_DELAYS) {
         reqSignal.throwIfAborted();
         try {
-          return await enqueueOnce(text, reqSignal);
+          return await enqueueOnce(text, html, reqSignal);
         } catch (error) {
           if (!(error instanceof OfflineError) || error.code !== 'busy') throw error;
           await sleep(delay, reqSignal);
         }
       }
       reqSignal.throwIfAborted();
-      return enqueueOnce(text, reqSignal);
+      return enqueueOnce(text, html, reqSignal);
     },
   };
 }
 
-// Reuse in-flight and completed translations of repeated text.
+// Reuse in-flight and completed translations of repeated text and inline HTML units.
 export class TranslationCache {
   private readonly entries = new Map<string, Promise<string>>();
 
@@ -127,35 +131,40 @@ export class TranslationCache {
   async translate(text: string): Promise<string> {
     const parts = Array.from(splitText(text));
     if (!parts.length) return text;
-    if (parts.length === 1) return this.translatePart(parts[0]!);
-    const translated = await Promise.all(parts.map(part => this.translatePart(part)));
+    if (parts.length === 1) return this.translatePart(parts[0]!, false);
+    const translated = await Promise.all(parts.map(part => this.translatePart(part, false)));
     return translated.join('');
   }
 
-  private async translatePart(part: string): Promise<string> {
-    this.signal.throwIfAborted();
-    const core = part.trim();
-    if (!core) return part;
-    const leading = part.length - part.trimStart().length;
-    const trailing = part.length - part.trimEnd().length;
-    return part.slice(0, leading) + await this.lookup(core) + part.slice(part.length - trailing);
+  translateHtml(html: string): Promise<string> {
+    return this.translatePart(html, true);
   }
 
-  private lookup(text: string): Promise<string> {
-    const present = this.entries.get(text);
+  private async translatePart(part: string, html: boolean): Promise<string> {
+    this.signal.throwIfAborted();
+    const core = part.trim();
+    if (!core || core.length > MAX_TRANSLATION_CHARS) return part;
+    const leading = part.length - part.trimStart().length;
+    const trailing = part.length - part.trimEnd().length;
+    const key = (html ? 'h:' : 'p:') + core;
+    return part.slice(0, leading) + await this.lookup(key, core, html) + part.slice(part.length - trailing);
+  }
+
+  private lookup(key: string, text: string, html: boolean): Promise<string> {
+    const present = this.entries.get(key);
     if (present) {
-      this.entries.delete(text);
-      this.entries.set(text, present);
+      this.entries.delete(key);
+      this.entries.set(key, present);
       return present;
     }
-    const pending = this.translator.translate(text, { signal: this.signal })
+    const pending = this.translator.translate(text, { signal: this.signal, html })
       .then(result => result.trim() || text)
       .catch((error: unknown) => {
-        if (this.entries.get(text) === pending) this.entries.delete(text);
+        if (this.entries.get(key) === pending) this.entries.delete(key);
         throw error;
       });
 
-    this.entries.set(text, pending);
+    this.entries.set(key, pending);
     if (this.entries.size > CACHE_ENTRIES) {
       const oldest = this.entries.keys().next();
       if (!oldest.done) this.entries.delete(oldest.value);

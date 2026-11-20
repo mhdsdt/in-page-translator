@@ -23,7 +23,7 @@ The first download for a language pair needs an internet connection. Installed p
 
 ## Coverage and privacy
 
-- The extension preserves editable content, form values, code, and translation opt-outs. Eligible labels are translated with their visible element. Visibility uses viewport clipping and CSS visibility, including inside same-origin frames. Open shadow roots can be discovered after the initial scan. A partially visible text node is translated as a unit.
+- The extension translates inline markup (such as links, bold, emphasis, and inline code) as coherent whole sentences while keeping live DOM nodes, links, and event listeners intact, and preserves editable content, form values, code, and translation opt-outs. Eligible labels and CSS pseudo-element `data-*` text are translated with their visible element. Visibility uses viewport clipping and CSS visibility, including inside same-origin frames. Open shadow roots can be discovered after the initial scan. A partially visible text node is translated as a unit.
 - Cross-origin frames, closed shadow roots, and text baked into images or canvas are outside its reach. Browser-internal pages and the Chrome Web Store restrict extension access. File pages require file access in the extension’s settings.
 - The extension contacts Mozilla’s public model bucket when you download a pack. Page text stays on your device. Original text for restoration stays in the page script’s memory. Downloaded packs live in the extension’s IndexedDB storage and the extension remembers the last target language.
 

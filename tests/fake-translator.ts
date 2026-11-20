@@ -34,33 +34,76 @@ interface FakeOptions {
   firstSetup?: 'engine-unavailable' | 'missing-packs';
   busy?: Record<string, number>;
   disconnectOnce?: string;
+  htmlMode?: 'wrap' | 'reorder' | 'drop-tag';
 }
 
 export async function installFake(
   popup: Popup,
-  { delay = 0, firstSetup, busy = {}, disconnectOnce }: FakeOptions = {},
+  { delay = 0, firstSetup, busy = {}, disconnectOnce, htmlMode = 'wrap' }: FakeOptions = {},
 ): Promise<void> {
   await popup.evaluate(`(async () => {
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
     await chrome.scripting.executeScript({
       target: { tabId: tab.id },
-      args: [${delay}, ${JSON.stringify(firstSetup ?? null)}, ${JSON.stringify(busy)}, ${JSON.stringify(disconnectOnce ?? null)}],
-      func: (delay, firstSetup, busy, disconnectOnce) => {
+      args: [
+        ${delay},
+        ${JSON.stringify(firstSetup ?? null)},
+        ${JSON.stringify(busy)},
+        ${JSON.stringify(disconnectOnce ?? null)},
+        ${JSON.stringify(htmlMode)},
+      ],
+      func: (delay, firstSetup, busy, disconnectOnce, htmlMode) => {
         globalThis.translationCalls = [];
+        globalThis.htmlCalls = [];
         globalThis.engineOpens = 0;
         let attempts = 0;
         let disconnected = false;
         const send = chrome.runtime.sendMessage.bind(chrome.runtime);
-        const translateOne = (text) => {
+
+        const wrapText = (text) => {
+          if (!/\\p{L}/u.test(text)) return text;
+          const lead = text.length - text.trimStart().length;
+          const trail = text.length - text.trimEnd().length;
+          return text.slice(0, lead) + '«' + text.trim() + '»' + text.slice(text.length - trail);
+        };
+
+        const translateHtml = (html) => {
+          globalThis.htmlCalls.push(html);
+          let out = '';
+          let inCode = 0;
+          const parts = html.split(/(<[^>]+>)/gu);
+          for (const part of parts) {
+            if (!part) continue;
+            if (part.startsWith('<')) {
+              if (/^<code\\b/iu.test(part)) inCode++;
+              else if (/^<\\/code\\b/iu.test(part)) inCode = Math.max(0, inCode - 1);
+              out += part;
+            } else {
+              out += inCode > 0 ? part : wrapText(part);
+            }
+          }
+          if (htmlMode === 'drop-tag') {
+            return out.replace(/<span\\b[^>]*id="0"[^>]*>/iu, '').replace('</span>', '');
+          }
+          if (htmlMode === 'reorder') {
+            const slots = out.match(/<(span|code)\\b[^>]*>.*?<\\/\\1>/gu);
+            if (slots && slots.length >= 2) {
+              return slots[1] + ' :: ' + slots[0];
+            }
+          }
+          return out;
+        };
+
+        const translateOne = (text, html) => {
           globalThis.translationCalls.push(text);
           if (busy[text] > 0) {
             busy[text]--;
             return { ok: false, error: 'busy' };
           }
-          return text === 'FAIL'
-            ? { ok: false, error: 'engine-unavailable' }
-            : { ok: true, value: '«' + text + '»' };
+          if (text === 'FAIL') return { ok: false, error: 'engine-unavailable' };
+          return { ok: true, value: html ? translateHtml(text) : '«' + text + '»' };
         };
+
         chrome.runtime.sendMessage = async message => {
           if (message.type === 'engine-open') {
             globalThis.engineOpens++;
@@ -76,15 +119,18 @@ export async function installFake(
               return undefined;
             }
             if (delay) await new Promise(resolve => setTimeout(resolve, delay));
-            return translateOne(message.text);
+            return translateOne(message.text, Boolean(message.html));
           }
           if (message.type === 'engine-translate-batch') {
-            if (disconnectOnce && !disconnected && message.texts.includes(disconnectOnce)) {
+            const items = Array.isArray(message.items)
+              ? message.items
+              : (message.texts || []).map(text => ({ text, html: false }));
+            if (disconnectOnce && !disconnected && items.some(item => item.text === disconnectOnce)) {
               disconnected = true;
               return undefined;
             }
             if (delay) await new Promise(resolve => setTimeout(resolve, delay));
-            return { ok: true, value: message.texts.map(translateOne) };
+            return { ok: true, value: items.map(item => translateOne(item.text, Boolean(item.html))) };
           }
           return send(message);
         };
@@ -99,6 +145,17 @@ export async function translationCalls(popup: Popup): Promise<string[]> {
     const [injection] = await chrome.scripting.executeScript({
       target: { tabId: tab.id },
       func: () => globalThis.translationCalls,
+    });
+    return injection.result;
+  })()`);
+}
+
+export async function htmlCalls(popup: Popup): Promise<string[]> {
+  return await popup.evaluate<string[]>(`(async () => {
+    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    const [injection] = await chrome.scripting.executeScript({
+      target: { tabId: tab.id },
+      func: () => globalThis.htmlCalls,
     });
     return injection.result;
   })()`);

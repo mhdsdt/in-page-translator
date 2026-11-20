@@ -1,7 +1,7 @@
 import { packKey } from '../shared/catalog';
 import type { Pack } from '../shared/catalog';
 import { OfflineError } from '../shared/offline';
-import type { ModelBuffers } from '../shared/offline';
+import type { ModelBuffers, TranslateItem } from '../shared/offline';
 import { BergamotWorker } from './bergamot';
 import { readPack } from './store';
 
@@ -141,11 +141,11 @@ export class Translator {
     return this.primary.use(route, () => undefined);
   }
 
-  translate(route: Pack[], texts: string[]): Promise<string[]> {
+  translate(route: Pack[], items: TranslateItem[]): Promise<string[]> {
     const slot = this.maxConcurrency(route) > 1 && this.burst.inFlight < this.primary.inFlight
       ? this.burst
       : this.primary;
-    return slot.use(route, worker => worker.translate(route.map(({ from, to }) => ({ from, to })), texts));
+    return slot.use(route, worker => worker.translate(route.map(({ from, to }) => ({ from, to })), items));
   }
 
   // Keep freshly verified buffers briefly in RAM so auto-translation skips an immediate IndexedDB read.

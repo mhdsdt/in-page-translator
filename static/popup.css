@@ -142,6 +142,7 @@ form { padding: 16px 16px 0; }
 
 .status .readiness[data-tone="warn"] { color: var(--warn); }
 .status .readiness[data-tone="progress"] { color: var(--accent-ink); }
+.status .readiness[data-tone="muted"] { color: var(--muted); }
 
 .status-icon {
   display: grid;

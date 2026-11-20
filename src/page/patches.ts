@@ -1,3 +1,8 @@
+import type { InlineAstNode } from '../shared/inline-html';
+import {
+  applyInlineAst, captureUnitSnapshot, matchesWrittenUnit, restoreUnitSnapshot,
+} from './inline';
+import type { InlineUnit, UnitSnapshot, WrittenUnitState } from './inline';
 import { canTranslate, fieldAllowed, isElement, isText, readField, writeField } from './surface';
 import type { Field, Target } from './surface';
 
@@ -12,15 +17,25 @@ export interface Counts {
   failed: number;
 }
 
+export interface InlineUnitRecord {
+  unit: InlineUnit;
+  attemptedHtml?: string;
+  busy: boolean;
+  snapshot?: UnitSnapshot;
+  written?: WrittenUnitState;
+}
+
 const DIR_CONTAINERS = new Set([
   'p', 'li', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'blockquote', 'dd', 'dt', 'td', 'th',
   'figcaption', 'caption', 'summary', 'div', 'article', 'section', 'main', 'aside',
   'header', 'footer', 'label', 'button', 'select',
 ]);
 
-// Tracks translated DOM fields, RTL direction overrides, in-flight attempts, and lossless restoration.
+// Tracks translated DOM fields, inline HTML sentence units, RTL direction overrides, and restoration.
 export class PatchLedger {
   private readonly patches = new Map<Target, Map<Field, Patch>>();
+  private readonly inlineUnits = new Map<Element, InlineUnitRecord>();
+  private readonly nodeToUnit = new WeakMap<Node, Element>();
   private readonly dirPatches = new Map<Element, string | null>();
   private readonly attempted = new WeakMap<Target, Map<Field, string>>();
   private readonly busy = new WeakMap<Target, Set<Field>>();
@@ -98,10 +113,71 @@ export class PatchLedger {
 
     if (this.targetRtl && field === 'text') {
       const container = dirContainer(node);
-      if (container && !this.dirPatches.has(container)) {
-        this.dirPatches.set(container, container.getAttribute('dir'));
-        container.setAttribute('dir', 'auto');
-      }
+      if (container) this.applyRtlDir(container);
+    }
+  }
+
+  hasUnit(root: Element): boolean {
+    return this.inlineUnits.has(root);
+  }
+
+  unitFor(node: Node): InlineUnitRecord | undefined {
+    const root = this.nodeToUnit.get(node);
+    return root ? this.inlineUnits.get(root) : undefined;
+  }
+
+  isOwnInlineMutation(target: Node): boolean {
+    const record = this.unitFor(target);
+    return Boolean(record?.written && matchesWrittenUnit(record.written));
+  }
+
+  beginInlineAttempt(unit: InlineUnit): boolean {
+    const existing = this.inlineUnits.get(unit.root);
+    if (existing?.attemptedHtml === unit.html) return false;
+    if (existing?.busy) this.clearInlineBusy(existing);
+    this.inlineUnits.set(unit.root, { unit, attemptedHtml: unit.html, busy: false });
+    this.counts.seen++;
+    return true;
+  }
+
+  cancelInlineAttempt(root: Element, html: string): void {
+    const record = this.inlineUnits.get(root);
+    if (!record || record.attemptedHtml !== html) return;
+    this.inlineUnits.delete(root);
+    this.counts.seen--;
+  }
+
+  recordInlineFailure(root: Element, html: string, retryAfterExit: boolean): void {
+    const record = this.inlineUnits.get(root);
+    this.counts.failed++;
+    if (!retryAfterExit || !record || record.attemptedHtml !== html) return;
+    record.attemptedHtml = undefined;
+    record.busy = true;
+  }
+
+  applyInlineTranslation(unit: InlineUnit, ast: readonly InlineAstNode[]): void {
+    const record = this.inlineUnits.get(unit.root);
+    if (!record) return;
+    const snapshot = captureUnitSnapshot(unit);
+    const written = applyInlineAst(unit, ast);
+    record.snapshot = snapshot;
+    record.written = written;
+    this.registerUnitNodes(unit, written);
+    this.counts.updated++;
+    if (this.targetRtl) this.applyRtlDir(unit.root);
+  }
+
+  forgetInlineUnit(root: Element, restore: boolean): void {
+    const record = this.inlineUnits.get(root);
+    if (!record) return;
+    if (record.busy) this.clearInlineBusy(record);
+    if (restore && record.snapshot && record.written) {
+      restoreUnitSnapshot(record.snapshot, record.written);
+    }
+    this.inlineUnits.delete(root);
+    if (restore && this.dirPatches.has(root)) {
+      restoreDir(root, this.dirPatches.get(root) ?? null);
+      this.dirPatches.delete(root);
     }
   }
 
@@ -119,6 +195,10 @@ export class PatchLedger {
     if (!allowed) {
       this.attempted.delete(node);
       for (const field of this.busy.get(node) ?? []) this.clearBusy(node, field);
+      const unitRecord = this.unitFor(node);
+      if (unitRecord) {
+        this.forgetInlineUnit(unitRecord.unit.root, true);
+      }
       if (isElement(node) && this.dirPatches.has(node)) {
         restoreDir(node, this.dirPatches.get(node) ?? null);
         this.dirPatches.delete(node);
@@ -136,10 +216,42 @@ export class PatchLedger {
       }
     }
     this.patches.clear();
+
+    for (const record of this.inlineUnits.values()) {
+      if (record.snapshot && record.written) {
+        restoreUnitSnapshot(record.snapshot, record.written);
+      }
+      if (performance.now() >= deadline) {
+        await yieldToPage();
+        deadline = performance.now() + sliceMs;
+      }
+    }
+    this.inlineUnits.clear();
+
     for (const [element, previous] of this.dirPatches) {
       restoreDir(element, previous);
     }
     this.dirPatches.clear();
+  }
+
+  private applyRtlDir(container: Element): void {
+    if (this.dirPatches.has(container)) return;
+    this.dirPatches.set(container, container.getAttribute('dir'));
+    container.setAttribute('dir', 'auto');
+  }
+
+  private registerUnitNodes(unit: InlineUnit, written: WrittenUnitState): void {
+    this.nodeToUnit.set(unit.root, unit.root);
+    for (const element of unit.elements) this.nodeToUnit.set(element, unit.root);
+    for (const text of unit.textNodes) this.nodeToUnit.set(text, unit.root);
+    for (const text of written.textByNode.keys()) this.nodeToUnit.set(text, unit.root);
+  }
+
+  private clearInlineBusy(record: InlineUnitRecord): void {
+    if (!record.busy) return;
+    record.busy = false;
+    this.counts.seen--;
+    this.counts.failed--;
   }
 
   private clearBusy(node: Target, field: Field): void {

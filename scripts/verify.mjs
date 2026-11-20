@@ -23,7 +23,7 @@ const FORBIDDEN_PERMISSIONS = new Set([
 ]);
 
 const BUNDLE_BUDGETS = {
-  'page.js': 35 * 1024,
+  'page.js': 42 * 1024,
   'popup.js': 110 * 1024,
   'packs.js': 110 * 1024,
   'offline.js': 110 * 1024,

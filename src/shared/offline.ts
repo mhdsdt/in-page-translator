@@ -2,6 +2,11 @@ export const MAX_TRANSLATION_CHARS = 1_200;
 
 export interface Pair { from: string; to: string }
 
+export interface TranslateItem {
+  text: string;
+  html?: boolean;
+}
+
 export interface AutoTranslateTarget {
   tabId: number;
   documentId: string;
@@ -42,8 +47,8 @@ export interface PackStatus {
 interface Calls {
   'engine-open': { request: object; result: void };
   'engine-prepare': { request: Pair; result: void };
-  'engine-translate': { request: Pair & { text: string }; result: string };
-  'engine-translate-batch': { request: Pair & { texts: string[] }; result: EngineReply<string>[] };
+  'engine-translate': { request: Pair & { text: string; html?: boolean }; result: string };
+  'engine-translate-batch': { request: Pair & { items: TranslateItem[] }; result: EngineReply<string>[] };
   'packs-state': { request: object; result: PackStatus };
   'packs-install': { request: Pair & { autoTranslate?: AutoTranslateTarget }; result: void };
   'packs-cancel': { request: object; result: void };

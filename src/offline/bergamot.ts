@@ -1,4 +1,4 @@
-import type { ModelBuffers, Pair } from '../shared/offline';
+import type { ModelBuffers, Pair, TranslateItem } from '../shared/offline';
 
 interface WorkerReply {
   id: number;
@@ -50,10 +50,10 @@ export class BergamotWorker {
     return this.call('freeTranslationModel', [pair], [], UNLOAD_TIMEOUT_MS);
   }
 
-  async translate(models: Pair[], texts: string[]): Promise<string[]> {
+  async translate(models: Pair[], items: TranslateItem[]): Promise<string[]> {
     const result = await this.call<Translation[]>('translate', [{
       models,
-      texts: texts.map(text => ({ text, html: false, qualityScores: false })),
+      texts: items.map(({ text, html = false }) => ({ text, html, qualityScores: false })),
     }], [], TRANSLATE_TIMEOUT_MS);
     return result.map(translation => translation.target.text);
   }

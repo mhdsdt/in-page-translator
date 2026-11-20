@@ -9,7 +9,7 @@ import type { PageError, PageState } from '../shared/protocol';
 
 export type Tone = 'idle' | 'busy' | 'success' | 'warn' | 'error' | 'off';
 export type ActionKind = 'translate' | 'download' | 'retry' | 'cancel' | 'restore';
-export type ReadinessTone = 'ready' | 'warn' | 'progress';
+export type ReadinessTone = 'ready' | 'warn' | 'progress' | 'muted';
 
 export interface PopupViewInput {
   page: PageState;
@@ -165,10 +165,14 @@ export function derivePopupView(input: PopupViewInput): PopupView {
     : page.phase === 'translated' ? 'success'
     : 'idle';
 
-  const showReadiness = Boolean(starting && !detecting && route.length && installed);
+  const blockedFrames = !starting ? (page.blockedFrames ?? 0) : 0;
+  const showReadiness = Boolean(
+    (starting && !detecting && route.length && installed) ||
+    (page.phase === 'translated' && blockedFrames > 0),
+  );
   let readinessText = '';
   let readinessTone: ReadinessTone = 'ready';
-  if (showReadiness && installed) {
+  if (starting && !detecting && route.length && installed) {
     const needed = route.filter(pack => !installed.has(pack.id));
     if (needed.length) {
       readinessText = (needed.length === 1 ? '1 pack' : needed.length + ' packs') +
@@ -178,6 +182,11 @@ export function derivePopupView(input: PopupViewInput): PopupView {
       readinessText = route.length > 1 ? 'Ready offline · via English' : 'Ready offline';
       readinessTone = 'ready';
     }
+  } else if (page.phase === 'translated' && blockedFrames > 0) {
+    readinessText = blockedFrames === 1
+      ? '1 third-party frame skipped (this site only)'
+      : blockedFrames + ' third-party frames skipped (this site only)';
+    readinessTone = 'muted';
   }
 
   const warmPair = starting && installed && from && route.length && !missing

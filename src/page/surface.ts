@@ -52,6 +52,9 @@ export function optionSelectOwner(node: Target): HTMLSelectElement | null {
   return null;
 }
 
+const FRAME_VISIBILITY = { opacityProperty: true, contentVisibilityAuto: true, visibilityProperty: true };
+const MIN_VISIBLE_FRAME_PX = 32;
+
 export function frameDocument(frame: Element): Document | null {
   if (frame.localName !== 'iframe' && frame.localName !== 'frame') return null;
   try {
@@ -59,6 +62,19 @@ export function frameDocument(frame: Element): Document | null {
   } catch {
     return null;
   }
+}
+
+export function isVisibleBlockedFrame(frame: Element, page: Document): boolean {
+  if (!eligible(frame, page) || frameDocument(frame) !== null) return false;
+  for (let current: Element | null = frame; current; ) {
+    if (!current.checkVisibility(FRAME_VISIBILITY)) return false;
+    const rect = current.getBoundingClientRect();
+    if (rect.width < MIN_VISIBLE_FRAME_PX || rect.height < MIN_VISIBLE_FRAME_PX) return false;
+    const doc: Document = current.ownerDocument;
+    if (doc === page) return true;
+    current = doc.defaultView?.frameElement ?? null;
+  }
+  return false;
 }
 
 export function liveOnPage(node: Node, page: Document): boolean {

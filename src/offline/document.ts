@@ -11,6 +11,7 @@ import { Translator } from './translator';
 interface Job {
   pair: Pair;
   text: string;
+  html: boolean;
   reply: (result: EngineReply<string>) => void;
 }
 
@@ -116,7 +117,7 @@ async function processBatch(pair: Pair, batch: Job[]): Promise<void> {
   }
 
   try {
-    const translations = await translator.translate(route, batch.map(job => job.text));
+    const translations = await translator.translate(route, batch.map(({ text, html }) => ({ text, html })));
     batch.forEach((job, index) => {
       const value = translations[index];
       job.reply(value === undefined ? { ok: false, error: 'engine-unavailable' } : { ok: true, value });
@@ -131,7 +132,7 @@ async function processBatch(pair: Pair, batch: Job[]): Promise<void> {
     // Isolate a failing text so it never takes down unrelated siblings in the same batch.
     for (const job of batch) {
       try {
-        const [value] = await translator.translate(route, [job.text]);
+        const [value] = await translator.translate(route, [{ text: job.text, html: job.html }]);
         job.reply(value === undefined ? { ok: false, error: 'engine-unavailable' } : { ok: true, value });
       } catch (itemError) {
         job.reply(failure(itemError));
@@ -168,31 +169,32 @@ chrome.runtime.onMessage.addListener((request: EngineRequest, sender, reply: (re
       reply({ ok: false, error: 'busy' });
       return;
     }
-    queue.push({ pair: request, text: request.text, reply });
+    queue.push({ pair: request, text: request.text, html: Boolean(request.html), reply });
     scheduleDrain();
     return true;
   }
 
   if (request.type === 'engine-translate-batch' && content) {
-    if (!Array.isArray(request.texts) || request.texts.length === 0 || request.texts.length > BATCH_LIMITS.maxItems) {
+    if (!Array.isArray(request.items) || request.items.length === 0 || request.items.length > BATCH_LIMITS.maxItems) {
       reply({ ok: false, error: 'busy' });
       return;
     }
-    const results = new Array<EngineReply<string>>(request.texts.length);
+    const results = new Array<EngineReply<string>>(request.items.length);
     let remaining = 0;
     const finish = () => {
       if (remaining === 0) reply({ ok: true, value: results });
     };
-    for (let index = 0; index < request.texts.length; index++) {
-      const text = request.texts[index];
-      if (typeof text !== 'string' || text.length > MAX_TRANSLATION_CHARS || queue.length >= MAX_QUEUED) {
+    for (let index = 0; index < request.items.length; index++) {
+      const item = request.items[index];
+      if (!item || typeof item.text !== 'string' || item.text.length > MAX_TRANSLATION_CHARS || queue.length >= MAX_QUEUED) {
         results[index] = { ok: false, error: 'busy' };
         continue;
       }
       remaining++;
       queue.push({
         pair: request,
-        text,
+        text: item.text,
+        html: Boolean(item.html),
         reply: itemReply => {
           results[index] = itemReply;
           remaining--;

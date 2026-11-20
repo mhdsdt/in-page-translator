@@ -23,7 +23,12 @@ function install(): void {
   let active: ActiveRun | undefined;
 
   const declared = () => normalizeLanguage(document.documentElement?.lang);
-  const snapshot = (): PageState => ({ ...state, declared: declared() });
+  const snapshot = (): PageState => {
+    const blockedFrames = active?.session?.blockedFrameCount() ?? 0;
+    return blockedFrames
+      ? { ...state, declared: declared(), blockedFrames }
+      : { ...state, declared: declared() };
+  };
   const notify = () => {
     const event: PageEvent = { type: 'page-state', state: snapshot() };
     void chrome.runtime.sendMessage(event).catch(() => {});

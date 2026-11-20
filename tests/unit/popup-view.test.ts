@@ -96,3 +96,31 @@ test('derivePopupView: handles same-language, unknown source, retry, translating
   assert.equal(partial.tone, 'warn');
   assert.match(partial.statusText, /Some text couldn’t be translated/);
 });
+
+test('derivePopupView: shows muted third-party frame notice only when translated with visible blocked frames', () => {
+  const oneBlocked = derivePopupView(base({
+    page: { phase: 'translated', source: 'de', target: 'en', updated: 5, failed: 0, blockedFrames: 1 },
+  }));
+  assert.equal(oneBlocked.tone, 'success');
+  assert.equal(oneBlocked.readinessHidden, false);
+  assert.equal(oneBlocked.readinessTone, 'muted');
+  assert.equal(oneBlocked.readinessText, '1 third-party frame skipped (this site only)');
+
+  const twoBlocked = derivePopupView(base({
+    page: { phase: 'translated', source: 'de', target: 'en', updated: 5, failed: 0, blockedFrames: 2 },
+  }));
+  assert.equal(twoBlocked.readinessHidden, false);
+  assert.equal(twoBlocked.readinessTone, 'muted');
+  assert.equal(twoBlocked.readinessText, '2 third-party frames skipped (this site only)');
+
+  const noneBlocked = derivePopupView(base({
+    page: { phase: 'translated', source: 'de', target: 'en', updated: 5, failed: 0, blockedFrames: 0 },
+  }));
+  assert.equal(noneBlocked.readinessHidden, true);
+
+  const originalBlocked = derivePopupView(base({
+    page: { phase: 'original', declared: 'de', updated: 0, failed: 0, blockedFrames: 1 },
+  }));
+  assert.equal(originalBlocked.readinessHidden, false);
+  assert.equal(originalBlocked.readinessText, 'Ready offline');
+});

@@ -1,11 +1,14 @@
-import type { TranslationCache } from './engine';
+import { parseInlineHtml, validateInlineTranslation } from '../shared/inline-html';
 import { OfflineError } from '../shared/offline';
+import type { TranslationCache } from './engine';
+import { buildInlineUnit, findInlineUnitRoot, isInlineFlowVisible } from './inline';
+import type { InlineUnit } from './inline';
 import { PatchLedger } from './patches';
 import type { Counts } from './patches';
 import { DomScanner } from './scanner';
 import {
   eligible, fieldAllowed, fieldsOf, frameDocument, hasTranslatableDataAttribute,
-  isElement, isText, isTranslatableButtonInput, liveOnPage, policyAttributes,
+  isElement, isText, isTranslatableButtonInput, isVisibleBlockedFrame, liveOnPage, policyAttributes,
   readField, textAttributes,
 } from './surface';
 import type { Field, SurfaceRoot, Target } from './surface';
@@ -25,8 +28,12 @@ interface Candidate {
 export class PageSession {
   private readonly observers = new Map<SurfaceRoot, AbortController>();
   private readonly seen = new Map<Target, Candidate[]>();
+  private readonly seenUnits = new Map<Element, InlineUnit>();
+  private readonly inlineRoots = new WeakSet<Element>();
+  private readonly inlineFallback = new WeakSet<Element>();
   private readonly slots = new WeakMap<HTMLSlotElement, Node[]>();
   private readonly knownFrames = new WeakSet<Element>();
+  private readonly inaccessibleFrames = new Set<Element>();
   private readonly checkedPseudo = new WeakSet<Element>();
   private readonly pendingRepair = new Set<Node>();
   private readonly ledger: PatchLedger;
@@ -50,16 +57,7 @@ export class PageSession {
       this.scanner.enqueue(root);
       this.schedule();
     });
-    this.viewport = new Viewport(signal, target => {
-      if (!eligible(target, this.document)) return;
-      const includePseudo = isElement(target);
-      if (includePseudo) this.checkedPseudo.add(target);
-      const fields = this.candidates(target, includePseudo);
-      if (fields.length) {
-        this.seen.set(target, fields);
-        this.schedule();
-      }
-    });
+    this.viewport = new Viewport(signal, target => this.onTargetSeen(target));
   }
 
   start(): void {
@@ -73,8 +71,38 @@ export class PageSession {
     this.observers.clear();
     this.scanner.clear();
     this.seen.clear();
+    this.seenUnits.clear();
     this.pendingRepair.clear();
+    this.inaccessibleFrames.clear();
     await this.ledger.restoreAll(SLICE_MS, yieldToPage);
+  }
+
+  private onTargetSeen(target: Target): void {
+    if (!eligible(target, this.document)) return;
+    const includePseudo = isElement(target);
+    if (includePseudo) this.checkedPseudo.add(target);
+
+    if (isElement(target) && this.inlineRoots.has(target)) {
+      this.inlineRoots.delete(target);
+      const unit = !this.inlineFallback.has(target) ? buildInlineUnit(target, this.document) : null;
+      if (unit && isInlineFlowVisible(unit)) {
+        this.seenUnits.set(target, unit);
+      } else {
+        this.inlineFallback.add(target);
+        this.enqueueInlineFallback(target);
+      }
+    }
+
+    const fields = this.candidates(target, includePseudo);
+    if (fields.length) this.seen.set(target, fields);
+    if (this.seen.size || this.seenUnits.size || this.scanner.hasWork) this.schedule();
+  }
+
+  private enqueueInlineFallback(root: Element): void {
+    const walker = this.document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+    for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+      this.scanner.enqueue(node);
+    }
   }
 
   private observe(root: SurfaceRoot): void {
@@ -108,6 +136,12 @@ export class PageSession {
     let styleChanged = false;
     for (const record of records) {
       if (record.type === 'childList') {
+        if (this.ledger.isOwnInlineMutation(record.target)) continue;
+        const unitRec = this.ledger.unitFor(record.target);
+        if (unitRec) {
+          this.invalidateInlineUnit(unitRec.unit.root, false);
+          changed = true;
+        }
         for (const node of record.addedNodes) {
           this.scanner.enqueue(node);
           changed = true;
@@ -119,7 +153,14 @@ export class PageSession {
           }
         }
       } else if (record.type === 'characterData' && isText(record.target)) {
-        if (this.onFieldChange(record.target, 'text')) changed = true;
+        if (this.ledger.isOwnInlineMutation(record.target)) continue;
+        const unitRec = this.ledger.unitFor(record.target);
+        if (unitRec) {
+          this.invalidateInlineUnit(unitRec.unit.root, false);
+          changed = true;
+        } else if (this.onFieldChange(record.target, 'text')) {
+          changed = true;
+        }
       } else if (record.type === 'attributes' && isElement(record.target)) {
         const name = record.attributeName;
         if (name === 'style') {
@@ -169,6 +210,15 @@ export class PageSession {
     }
   }
 
+  private invalidateInlineUnit(root: Element, restore: boolean): void {
+    this.ledger.forgetInlineUnit(root, restore);
+    this.inlineFallback.delete(root);
+    this.inlineRoots.delete(root);
+    this.seenUnits.delete(root);
+    this.viewport.forget(root);
+    this.scanner.enqueue(root);
+  }
+
   private onFieldChange(node: Target, field: Field): boolean {
     if (this.ledger.isOwnWrite(node, field)) return false;
     this.ledger.forgetField(node, field);
@@ -180,7 +230,7 @@ export class PageSession {
 
   private schedule(): void {
     if (this.running || this.signal.aborted ||
-      (!this.scanner.hasWork && !this.pendingRepair.size && !this.seen.size)) return;
+      (!this.scanner.hasWork && !this.pendingRepair.size && !this.seen.size && !this.seenUnits.size)) return;
     this.running = true;
     void this.drain().finally(() => {
       this.running = false;
@@ -194,7 +244,18 @@ export class PageSession {
       if (this.pendingRepair.size) await this.repair();
       if (this.signal.aborted) return;
 
-      if (this.seen.size) {
+      if (this.seenUnits.size) {
+        const units: InlineUnit[] = [];
+        for (const [root, unit] of this.seenUnits) {
+          this.seenUnits.delete(root);
+          units.push(unit);
+          if (units.length >= FIELDS_PER_BATCH || performance.now() >= deadline) break;
+        }
+        if (units.length) {
+          await this.applyUnits(units);
+          if (!this.signal.aborted) this.report(this.ledger.counts, false);
+        }
+      } else if (this.seen.size) {
         const batch: Candidate[] = [];
         for (const [target, fields] of this.seen) {
           this.seen.delete(target);
@@ -219,12 +280,28 @@ export class PageSession {
 
   private visit(node: Node): void {
     if (isElement(node)) this.discoverRoots(node);
-    if ((isText(node) || isElement(node)) && !this.seen.has(node)) {
+    if (isText(node) && !this.seen.has(node)) {
+      if (this.ledger.unitFor(node)) return;
+      const fields = fieldsOf(node);
+      if (!fields.length || fields.every(field => this.ledger.original(node, field) === undefined)) return;
+      if (!eligible(node, this.document)) return;
+
+      const unitRoot = findInlineUnitRoot(node, this.document);
+      if (unitRoot && !this.inlineFallback.has(unitRoot)) {
+        if (!this.ledger.hasUnit(unitRoot) && !this.seenUnits.has(unitRoot)) {
+          this.inlineRoots.add(unitRoot);
+          this.viewport.observe(unitRoot);
+        }
+        return;
+      }
+      this.viewport.observe(node);
+      return;
+    }
+
+    if (isElement(node) && !this.seen.has(node)) {
       const fields = fieldsOf(node);
       const hasStandard = fields.length > 0 && fields.some(field => this.ledger.original(node, field) !== undefined);
-      const needsPseudo = !hasStandard && isElement(node) && !this.checkedPseudo.has(node) &&
-        hasTranslatableDataAttribute(node);
-      // Check text/attribute eligibility before walking ancestors to skip whitespace-only nodes in O(1).
+      const needsPseudo = !hasStandard && !this.checkedPseudo.has(node) && hasTranslatableDataAttribute(node);
       if ((hasStandard || needsPseudo) && eligible(node, this.document)) {
         this.viewport.observe(node);
       }
@@ -256,45 +333,111 @@ export class PageSession {
     }
   }
 
+  blockedFrameCount(): number {
+    let count = 0;
+    for (const frame of this.inaccessibleFrames) {
+      if (!liveOnPage(frame, this.document) || frameDocument(frame) !== null) {
+        this.inaccessibleFrames.delete(frame);
+        continue;
+      }
+      if (isVisibleBlockedFrame(frame, this.document)) count++;
+    }
+    return count;
+  }
+
   private discoverFrame(element: Element): void {
     const nested = frameDocument(element);
-    if (!nested || !eligible(element, this.document)) return;
+    if (!nested) {
+      if (eligible(element, this.document)) this.inaccessibleFrames.add(element);
+      return;
+    }
+    this.inaccessibleFrames.delete(element);
+    if (!eligible(element, this.document)) return;
     this.observe(nested);
     this.scanner.enqueue(nested);
   }
 
-  private async applyBatch(batch: Candidate[]): Promise<void> {
+  private async runLanes<T>(items: readonly T[], run: (item: T) => Promise<void>): Promise<void> {
+    if (items.length === 0) return;
     let cursor = 0;
-    const runLane = async () => {
+    const worker = async () => {
       while (!this.signal.aborted) {
-        const candidate = batch[cursor++];
-        if (!candidate) return;
-        const { node, field, original } = candidate;
-        if (!this.matches(candidate) || !this.ledger.beginAttempt(node, field, original)) continue;
-        let written: string;
-        try {
-          written = await this.cache.translate(original);
-        } catch (error) {
-          if (this.signal.aborted) continue;
-          if (!this.matches(candidate)) {
-            this.ledger.cancelAttempt(node, field, original);
-            continue;
-          }
-          const retryAfterExit = error instanceof OfflineError && error.code === 'busy';
-          this.ledger.recordFailure(node, field, original, retryAfterExit);
-          if (retryAfterExit) this.viewport.observe(node, true);
-          continue;
-        }
-        if (this.signal.aborted) continue;
-        if (!this.matches(candidate)) {
-          // Node changed or temporarily became ineligible mid-flight; don't poison future scans.
-          this.ledger.cancelAttempt(node, field, original);
-          continue;
-        }
-        this.ledger.applyTranslation(node, field, original, written);
+        const item = items[cursor++];
+        if (item === undefined) return;
+        await run(item);
       }
     };
-    await Promise.all(Array.from({ length: Math.min(TRANSLATION_LANES, batch.length) }, runLane));
+    await Promise.all(Array.from({ length: Math.min(TRANSLATION_LANES, items.length) }, worker));
+  }
+
+  private async applyUnits(units: InlineUnit[]): Promise<void> {
+    await this.runLanes(units, async (unit) => {
+      if (!this.matchesUnit(unit) || !this.ledger.beginInlineAttempt(unit)) return;
+      let translatedHtml: string;
+      try {
+        translatedHtml = await this.cache.translateHtml(unit.html);
+      } catch (error) {
+        if (this.signal.aborted) return;
+        if (!this.matchesUnit(unit)) {
+          this.ledger.cancelInlineAttempt(unit.root, unit.html);
+          return;
+        }
+        const retryAfterExit = error instanceof OfflineError && error.code === 'busy';
+        this.ledger.recordInlineFailure(unit.root, unit.html, retryAfterExit);
+        if (retryAfterExit) {
+          this.inlineRoots.add(unit.root);
+          this.viewport.observe(unit.root, true);
+        }
+        return;
+      }
+      if (this.signal.aborted) return;
+      if (!this.matchesUnit(unit)) {
+        this.ledger.cancelInlineAttempt(unit.root, unit.html);
+        return;
+      }
+      const parsed = parseInlineHtml(translatedHtml, unit.slotIds);
+      if (!validateInlineTranslation(parsed, unit.slotIds, unit.opaqueIds)) {
+        this.ledger.cancelInlineAttempt(unit.root, unit.html);
+        this.inlineFallback.add(unit.root);
+        this.enqueueInlineFallback(unit.root);
+        return;
+      }
+      this.ledger.applyInlineTranslation(unit, parsed.nodes);
+    });
+  }
+
+  private matchesUnit(unit: InlineUnit): boolean {
+    if (!eligible(unit.root, this.document)) return false;
+    const current = buildInlineUnit(unit.root, this.document);
+    return Boolean(current && current.html === unit.html);
+  }
+
+  private async applyBatch(batch: Candidate[]): Promise<void> {
+    await this.runLanes(batch, async (candidate) => {
+      const { node, field, original } = candidate;
+      if (!this.matches(candidate) || !this.ledger.beginAttempt(node, field, original)) return;
+      let written: string;
+      try {
+        written = await this.cache.translate(original);
+      } catch (error) {
+        if (this.signal.aborted) return;
+        if (!this.matches(candidate)) {
+          this.ledger.cancelAttempt(node, field, original);
+          return;
+        }
+        const retryAfterExit = error instanceof OfflineError && error.code === 'busy';
+        this.ledger.recordFailure(node, field, original, retryAfterExit);
+        if (retryAfterExit) this.viewport.observe(node, true);
+        return;
+      }
+      if (this.signal.aborted) return;
+      if (!this.matches(candidate)) {
+        // Node changed or temporarily became ineligible mid-flight; don't poison future scans.
+        this.ledger.cancelAttempt(node, field, original);
+        return;
+      }
+      this.ledger.applyTranslation(node, field, original, written);
+    });
   }
 
   private matches({ node, field, original }: Candidate): boolean {
@@ -341,12 +484,25 @@ export class PageSession {
   private repairTarget(node: Target): void {
     const allowed = eligible(node, this.document);
     if (isElement(node)) {
-      if (!liveOnPage(node, this.document)) this.shadows.forget(node);
+      if (!liveOnPage(node, this.document)) {
+        this.shadows.forget(node);
+        this.inaccessibleFrames.delete(node);
+      }
       if (isSlot(node)) this.queueAssigned(node);
     }
+    const unitBefore = !allowed ? this.ledger.unitFor(node) : undefined;
     this.ledger.repairNode(node, allowed);
     if (!allowed) {
-      if (isElement(node)) this.checkedPseudo.delete(node);
+      if (isElement(node)) {
+        this.checkedPseudo.delete(node);
+        this.inlineRoots.delete(node);
+        this.inlineFallback.delete(node);
+        this.seenUnits.delete(node);
+      }
+      if (unitBefore && unitBefore.unit.root !== node && eligible(unitBefore.unit.root, this.document)) {
+        this.inlineFallback.delete(unitBefore.unit.root);
+        this.scanner.enqueue(unitBefore.unit.root);
+      }
       this.viewport.forget(node);
       this.seen.delete(node);
     } else if (isText(node)) {
