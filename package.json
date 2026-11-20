@@ -11,8 +11,10 @@
   "scripts": {
     "build": "node scripts/build.mjs",
     "typecheck": "tsc --noEmit",
+    "verify": "node scripts/verify.mjs",
+    "test:unit": "node scripts/run-unit-tests.mjs",
     "test": "npm run build && playwright test --project regression",
-    "check": "npm run typecheck && npm test",
+    "check": "npm run typecheck && npm run test:unit && npm run build && npm run verify && playwright test --project regression",
     "models:refresh": "node scripts/refresh-catalog.mjs",
     "test:packs": "npm run build && playwright test --project packs"
   },

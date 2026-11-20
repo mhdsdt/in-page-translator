@@ -1,10 +1,10 @@
-import { engineRequest, MAX_TRANSLATION_CHARS, OfflineError, requestEngine } from '../shared/offline';
+import { packBatches } from '../shared/batch';
+import { engineRequest, OfflineError, requestEngine } from '../shared/offline';
 import type { EngineReply, Pair } from '../shared/offline';
+import { splitText } from '../shared/text';
 
 const REQUEST_TIMEOUT_MS = 45_000;
-const IPC_BATCH_MAX_TEXTS = 24;
-const IPC_BATCH_MAX_CHARS = 2_400;
-const TARGET_CHUNK_CHARS = 800;
+const IPC_BATCH_LIMITS = { maxItems: 24, maxChars: 2_400 };
 const CACHE_ENTRIES = 2_048;
 const BUSY_DELAYS = [50, 150, 450] as const;
 
@@ -82,19 +82,9 @@ export async function openEngine(pair: Pair, signal: AbortSignal): Promise<Trans
     const all = queued;
     queued = [];
     if (!all.length) return;
-
-    let batch: PendingItem[] = [];
-    let chars = 0;
-    for (const item of all) {
-      if (batch.length >= IPC_BATCH_MAX_TEXTS || (batch.length > 0 && chars + item.text.length > IPC_BATCH_MAX_CHARS)) {
-        void dispatchBatch(batch);
-        batch = [];
-        chars = 0;
-      }
-      batch.push(item);
-      chars += item.text.length;
+    for (const batch of packBatches(all, item => item.text.length, IPC_BATCH_LIMITS)) {
+      void dispatchBatch(batch);
     }
-    if (batch.length) void dispatchBatch(batch);
   }
 
   function enqueueOnce(text: string, reqSignal: AbortSignal): Promise<string> {
@@ -136,6 +126,7 @@ export class TranslationCache {
 
   async translate(text: string): Promise<string> {
     const parts = Array.from(splitText(text));
+    if (!parts.length) return text;
     if (parts.length === 1) return this.translatePart(parts[0]!);
     const translated = await Promise.all(parts.map(part => this.translatePart(part)));
     return translated.join('');
@@ -189,48 +180,4 @@ function sleep(ms: number, signal: AbortSignal): Promise<void> {
     }, ms);
     signal.addEventListener('abort', onAbort, { once: true });
   });
-}
-
-const SENTENCE_BREAK = /[\n。！？；.!?;]/u;
-
-function* splitText(text: string): Generator<string> {
-  if (text.length <= MAX_TRANSLATION_CHARS) {
-    yield text;
-    return;
-  }
-  let start = 0;
-  while (text.length - start > MAX_TRANSLATION_CHARS) {
-    const limit = Math.min(start + MAX_TRANSLATION_CHARS, text.length);
-    const target = Math.min(start + TARGET_CHUNK_CHARS, limit);
-    const floor = start + Math.floor(TARGET_CHUNK_CHARS / 2);
-    let end = -1;
-
-    // Prefer sentence boundaries near the target chunk size for better translation quality.
-    for (let candidate = limit - 1; candidate >= floor; candidate--) {
-      const char = text.charAt(candidate);
-      if (SENTENCE_BREAK.test(char)) {
-        const after = candidate + 1;
-        if (char === '\n' || /[\u3002\uff01\uff1f\uff1b]/u.test(char) || after === limit || /\s/u.test(text.charAt(after))) {
-          end = after;
-          if (candidate <= target) break;
-        }
-      }
-    }
-    if (end === -1) {
-      for (let candidate = limit; candidate > floor; candidate--) {
-        if (/\s/u.test(text.charAt(candidate))) {
-          end = candidate;
-          break;
-        }
-      }
-    }
-    if (end <= start) end = limit;
-
-    // Keep a UTF-16 surrogate pair together when a long input has no boundary.
-    const code = text.charCodeAt(end);
-    if (code >= 0xdc00 && code <= 0xdfff && end > start + 1) end--;
-    yield text.slice(start, end);
-    start = end;
-  }
-  if (start < text.length) yield text.slice(start);
 }

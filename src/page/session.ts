@@ -1,15 +1,17 @@
 import type { TranslationCache } from './engine';
 import { OfflineError } from '../shared/offline';
+import { PatchLedger } from './patches';
+import type { Counts } from './patches';
+import { DomScanner } from './scanner';
 import {
-  canTranslate, eligible, fieldAllowed, fieldsOf, frameDocument, isElement, isSkippedElement,
-  isText, liveOnPage, policyAttributes, readField, textAttributes, writeField,
+  eligible, fieldAllowed, fieldsOf, frameDocument, isElement,
+  isText, liveOnPage, policyAttributes, readField, textAttributes,
 } from './surface';
 import type { Field, SurfaceRoot, Target } from './surface';
 import { Viewport } from './viewport';
 import { ShadowDiscovery } from './shadow-discovery';
 
 const SLICE_MS = 6;
-const NODES_PER_SLICE = 400;
 const FIELDS_PER_BATCH = 24;
 const TRANSLATION_LANES = 12;
 
@@ -19,32 +21,17 @@ interface Candidate {
   original: string;
 }
 
-interface Patch {
-  original: string;
-  written: string;
-}
-
-interface Counts {
-  seen: number;
-  updated: number;
-  failed: number;
-}
-
 export class PageSession {
-  private readonly pending = new Set<Node>();
   private readonly observers = new Map<SurfaceRoot, AbortController>();
   private readonly seen = new Map<Target, Candidate[]>();
-  private readonly busy = new WeakMap<Target, Set<Field>>();
-  private readonly attempted = new WeakMap<Target, Map<Field, string>>();
+  private readonly slots = new WeakMap<HTMLSlotElement, Node[]>();
+  private readonly knownFrames = new WeakSet<Element>();
+  private readonly pendingRepair = new Set<Node>();
+  private readonly ledger = new PatchLedger();
+  private readonly scanner: DomScanner;
   private readonly viewport: Viewport;
   private readonly shadows: ShadowDiscovery;
-  private readonly slots = new WeakMap<HTMLSlotElement, Node[]>();
-  private scanCursor?: { root: Node; walker: TreeWalker };
-  private readonly knownFrames = new WeakSet<Element>();
-  private readonly patches = new Map<Target, Map<Field, Patch>>();
-  private readonly counts: Counts = { seen: 0, updated: 0, failed: 0 };
   private running = false;
-  private readonly pendingRepair = new Set<Node>();
 
   constructor(
     private readonly document: Document,
@@ -52,10 +39,11 @@ export class PageSession {
     private readonly signal: AbortSignal,
     private readonly report: (counts: Readonly<Counts>, idle: boolean) => void,
   ) {
+    this.scanner = new DomScanner(document, node => this.visit(node));
     this.shadows = new ShadowDiscovery(signal, root => {
       if (!liveOnPage(root, this.document)) return;
       this.observe(root);
-      this.enqueue(root);
+      this.scanner.enqueue(root);
       this.schedule();
     });
     this.viewport = new Viewport(signal, target => {
@@ -70,27 +58,17 @@ export class PageSession {
 
   start(): void {
     this.observe(this.document);
-    this.enqueue(this.document);
+    this.scanner.enqueue(this.document);
     this.schedule();
   }
 
   async restore(): Promise<void> {
     for (const observer of this.observers.values()) observer.abort();
     this.observers.clear();
-    this.pending.clear();
+    this.scanner.clear();
     this.seen.clear();
-    this.scanCursor = undefined;
     this.pendingRepair.clear();
-
-    let deadline = performance.now() + SLICE_MS;
-    for (const [node, fields] of this.patches) {
-      for (const [field, patch] of fields) this.undo(node, field, patch);
-      if (performance.now() >= deadline) {
-        await yieldToPage();
-        deadline = performance.now() + SLICE_MS;
-      }
-    }
-    this.patches.clear();
+    await this.ledger.restoreAll(SLICE_MS, yieldToPage);
   }
 
   private observe(root: SurfaceRoot): void {
@@ -125,7 +103,7 @@ export class PageSession {
     for (const record of records) {
       if (record.type === 'childList') {
         for (const node of record.addedNodes) {
-          this.enqueue(node);
+          this.scanner.enqueue(node);
           changed = true;
         }
         for (const node of record.removedNodes) {
@@ -152,7 +130,7 @@ export class PageSession {
         }
         if (name === 'class' || name === 'hidden' ||
           name === 'translate' || name === 'contenteditable' || name === 'slot') {
-          this.enqueue(record.target);
+          this.scanner.enqueue(record.target);
           this.pendingRepair.add(record.target);
           changed = true;
         } else if (name) {
@@ -168,31 +146,17 @@ export class PageSession {
   }
 
   private onFieldChange(node: Target, field: Field): boolean {
-    const fields = this.patches.get(node);
-    const patch = fields?.get(field);
-    if (patch && readField(node, field) === patch.written) return false;
-    this.attempted.get(node)?.delete(field);
-    this.clearBusy(node, field);
+    if (this.ledger.isOwnWrite(node, field)) return false;
+    this.ledger.forgetField(node, field);
     this.seen.delete(node);
     this.viewport.forget(node);
-    if (fields) {
-      fields.delete(field);
-      if (!fields.size) this.patches.delete(node);
-    }
-    this.enqueue(node);
+    this.scanner.enqueue(node);
     return true;
-  }
-
-  private enqueue(node: Node): void {
-    if (isElement(node) || isText(node) || node.nodeType === Node.DOCUMENT_NODE ||
-      node.nodeType === Node.DOCUMENT_FRAGMENT_NODE) {
-      this.pending.add(node);
-    }
   }
 
   private schedule(): void {
     if (this.running || this.signal.aborted ||
-      (!this.pending.size && !this.pendingRepair.size && !this.seen.size && !this.scanCursor)) return;
+      (!this.scanner.hasWork && !this.pendingRepair.size && !this.seen.size)) return;
     this.running = true;
     void this.drain().finally(() => {
       this.running = false;
@@ -215,60 +179,17 @@ export class PageSession {
         }
         if (batch.length) {
           await this.applyBatch(batch);
-          if (!this.signal.aborted) this.report(this.counts, false);
+          if (!this.signal.aborted) this.report(this.ledger.counts, false);
         }
-      } else {
-        if (!this.scanCursor) {
-          const next = this.pending.values().next();
-          if (next.done) {
-            this.report(this.counts, true);
-            return;
-          }
-          this.pending.delete(next.value);
-          this.beginScan(next.value);
-        }
-        this.discoverSlice(deadline);
+      } else if (!this.scanner.step(deadline)) {
+        this.report(this.ledger.counts, true);
+        return;
       }
-      if (performance.now() >= deadline || this.scanCursor) {
+
+      if (performance.now() >= deadline || this.scanner.active) {
         await yieldToPage();
         deadline = performance.now() + SLICE_MS;
       }
-    }
-  }
-
-  private beginScan(root: Node): void {
-    if (!liveOnPage(root, this.document)) return;
-    if (isElement(root) && isSkippedElement(root)) return;
-    this.visit(root);
-    if (isText(root)) return;
-    const walker = this.document.createTreeWalker(
-      root,
-      NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT,
-      node => (isElement(node) && isSkippedElement(node)) ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT,
-    );
-    this.scanCursor = { root, walker };
-  }
-
-  private discoverSlice(deadline: number): void {
-    const cursor = this.scanCursor;
-    if (!cursor) return;
-    if (!liveOnPage(cursor.root, this.document)) {
-      this.scanCursor = undefined;
-      return;
-    }
-    // If the exact node at the previous yield boundary was removed, restart from its live root.
-    if (!liveOnPage(cursor.walker.currentNode, this.document)) {
-      cursor.walker.currentNode = cursor.root;
-    }
-
-    for (let visited = 0; visited < NODES_PER_SLICE; visited++) {
-      const node = cursor.walker.nextNode();
-      if (!node) {
-        this.scanCursor = undefined;
-        return;
-      }
-      this.visit(node);
-      if (performance.now() >= deadline) return;
     }
   }
 
@@ -278,7 +199,7 @@ export class PageSession {
       const fields = fieldsOf(node);
       // Check text eligibility before walking ancestors to skip whitespace-only nodes in O(1).
       if (fields.length &&
-        fields.some(field => this.original(node, field) !== undefined) &&
+        fields.some(field => this.ledger.original(node, field) !== undefined) &&
         eligible(node, this.document)) {
         this.viewport.observe(node);
       }
@@ -288,16 +209,10 @@ export class PageSession {
   private candidates(node: Target): Candidate[] {
     const batch: Candidate[] = [];
     for (const field of fieldsOf(node)) {
-      const original = this.original(node, field);
+      const original = this.ledger.original(node, field);
       if (original !== undefined) batch.push({ node, field, original });
     }
     return batch;
-  }
-
-  private original(node: Target, field: Field): string | undefined {
-    const value = readField(node, field);
-    if (value !== null && this.attempted.get(node)?.get(field) !== value &&
-      this.patches.get(node)?.get(field)?.written !== value && canTranslate(value)) return value;
   }
 
   private discoverRoots(element: Element): void {
@@ -320,7 +235,7 @@ export class PageSession {
     const nested = frameDocument(element);
     if (!nested || !eligible(element, this.document)) return;
     this.observe(nested);
-    this.enqueue(nested);
+    this.scanner.enqueue(nested);
   }
 
   private async applyBatch(batch: Candidate[]): Promise<void> {
@@ -330,64 +245,31 @@ export class PageSession {
         const candidate = batch[cursor++];
         if (!candidate) return;
         const { node, field, original } = candidate;
-        if (!this.matches(candidate) || this.attempted.get(node)?.get(field) === original) continue;
-        let attempts = this.attempted.get(node);
-        if (!attempts) {
-          attempts = new Map();
-          this.attempted.set(node, attempts);
-        }
-        attempts.set(field, original);
-        this.clearBusy(node, field);
-        this.counts.seen++;
+        if (!this.matches(candidate) || !this.ledger.beginAttempt(node, field, original)) continue;
         let written: string;
         try {
           written = await this.cache.translate(original);
         } catch (error) {
           if (this.signal.aborted) continue;
           if (!this.matches(candidate)) {
-            if (attempts.get(field) === original) attempts.delete(field);
-            this.counts.seen--;
+            this.ledger.cancelAttempt(node, field, original);
             continue;
           }
-          this.counts.failed++;
-          if (error instanceof OfflineError && error.code === 'busy') {
-            if (attempts.get(field) === original) attempts.delete(field);
-            let deferred = this.busy.get(node);
-            if (!deferred) {
-              deferred = new Set();
-              this.busy.set(node, deferred);
-            }
-            deferred.add(field);
-            this.viewport.observe(node, true);
-          }
+          const retryAfterExit = error instanceof OfflineError && error.code === 'busy';
+          this.ledger.recordFailure(node, field, original, retryAfterExit);
+          if (retryAfterExit) this.viewport.observe(node, true);
           continue;
         }
         if (this.signal.aborted) continue;
         if (!this.matches(candidate)) {
           // Node changed or temporarily became ineligible mid-flight; don't poison future scans.
-          if (attempts.get(field) === original) attempts.delete(field);
-          this.counts.seen--;
+          this.ledger.cancelAttempt(node, field, original);
           continue;
         }
-        if (original !== written) {
-          let fields = this.patches.get(node);
-          if (!fields) {
-            fields = new Map();
-            this.patches.set(node, fields);
-          }
-          fields.set(field, { original, written });
-          writeField(node, field, written);
-          this.counts.updated++;
-        }
+        this.ledger.applyTranslation(node, field, original, written);
       }
     };
     await Promise.all(Array.from({ length: Math.min(TRANSLATION_LANES, batch.length) }, runLane));
-  }
-
-  private clearBusy(node: Target, field: Field): void {
-    if (!this.busy.get(node)?.delete(field)) return;
-    this.counts.seen--;
-    this.counts.failed--;
   }
 
   private matches({ node, field, original }: Candidate): boolean {
@@ -426,7 +308,7 @@ export class PageSession {
     const current = slot.assignedNodes();
     for (const node of new Set([...(this.slots.get(slot) ?? []), ...current])) {
       this.pendingRepair.add(node);
-      this.enqueue(node);
+      this.scanner.enqueue(node);
     }
     this.slots.set(slot, current);
   }
@@ -437,30 +319,15 @@ export class PageSession {
       if (!liveOnPage(node, this.document)) this.shadows.forget(node);
       if (isSlot(node)) this.queueAssigned(node);
     }
-    const fields = this.patches.get(node);
-    if (fields) {
-      for (const [field, patch] of fields) {
-        if (allowed && fieldAllowed(node, field)) continue;
-        this.undo(node, field, patch);
-        fields.delete(field);
-        this.attempted.get(node)?.delete(field);
-      }
-      if (!fields.size) this.patches.delete(node);
-    }
+    this.ledger.repairNode(node, allowed);
     if (!allowed) {
       this.viewport.forget(node);
       this.seen.delete(node);
-      this.attempted.delete(node);
-      for (const field of this.busy.get(node) ?? []) this.clearBusy(node, field);
     } else if (isText(node)) {
       // A moved text node may now have a different clipping element.
       this.viewport.forget(node);
-      this.enqueue(node);
+      this.scanner.enqueue(node);
     }
-  }
-
-  private undo(node: Target, field: Field, patch: Patch): void {
-    if (readField(node, field) === patch.written) writeField(node, field, patch.original);
   }
 }
 

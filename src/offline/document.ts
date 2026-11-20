@@ -1,3 +1,4 @@
+import { takePrefixBatch } from '../shared/batch';
 import { MAX_TRANSLATION_CHARS, OfflineError } from '../shared/offline';
 import type { AutoTranslateTarget, EngineReply, EngineRequest, Pair } from '../shared/offline';
 import { Packs } from './packs';
@@ -10,8 +11,7 @@ interface Job {
 }
 
 const MAX_QUEUED = 128;
-const BATCH_MAX_TEXTS = 32;
-const BATCH_MAX_CHARS = 2_400;
+const BATCH_LIMITS = { maxItems: 32, maxChars: 2_400 };
 const COALESCE_MS = 4;
 
 const translator = new Translator();
@@ -49,11 +49,11 @@ function scheduleDrain(): void {
 }
 
 function batchReady(): boolean {
-  if (queue.length >= BATCH_MAX_TEXTS) return true;
+  if (queue.length >= BATCH_LIMITS.maxItems) return true;
   let chars = 0;
   for (const job of queue) {
     chars += job.text.length;
-    if (chars >= BATCH_MAX_CHARS) return true;
+    if (chars >= BATCH_LIMITS.maxChars) return true;
   }
   return false;
 }
@@ -105,15 +105,12 @@ async function drain(): Promise<void> {
 }
 
 function takeBatch(pair: Pair): Job[] {
-  const batch: Job[] = [];
-  let chars = 0;
-  for (const job of queue) {
-    if (job.pair.from !== pair.from || job.pair.to !== pair.to) break;
-    if (batch.length >= BATCH_MAX_TEXTS) break;
-    if (batch.length > 0 && chars + job.text.length > BATCH_MAX_CHARS) break;
-    batch.push(job);
-    chars += job.text.length;
-  }
+  const batch = takePrefixBatch(
+    queue,
+    job => job.pair.from === pair.from && job.pair.to === pair.to,
+    job => job.text.length,
+    BATCH_LIMITS,
+  );
   queue.splice(0, batch.length);
   return batch;
 }
@@ -140,7 +137,7 @@ chrome.runtime.onMessage.addListener((request: EngineRequest, sender, reply: (re
   }
 
   if (request.type === 'engine-translate-batch' && content) {
-    if (!Array.isArray(request.texts) || request.texts.length === 0 || request.texts.length > BATCH_MAX_TEXTS) {
+    if (!Array.isArray(request.texts) || request.texts.length === 0 || request.texts.length > BATCH_LIMITS.maxItems) {
       reply({ ok: false, error: 'busy' });
       return;
     }

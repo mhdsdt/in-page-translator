@@ -1,5 +1,8 @@
 import { catalog, formatSize, inputs, outputs, packBytes, routeFor } from '../shared/catalog';
 import type { Pack } from '../shared/catalog';
+import {
+  downloadProgressRatio, formatDownloadBytes, formatDownloadFailure, formatDownloadLabel, totalPackBytes,
+} from '../shared/format';
 import { fillLanguages, pairName } from '../shared/languages';
 import { engineRequest, OfflineError, requestEngine } from '../shared/offline';
 import type { PackStatus } from '../shared/offline';
@@ -125,7 +128,7 @@ function render(): void {
     ? from.value === to.value ? 'Choose two different languages.' : 'This language pair is unavailable.'
     : !state ? readFailed ? 'Pack status unavailable.' : 'Checking installed packs…'
     : missing.length ? missing.length + (missing.length === 1 ? ' pack' : ' packs') +
-      ' to download · ' + formatSize(total(missing, 'size'))
+      ' to download · ' + formatSize(totalPackBytes(missing, 'size'))
     : returnPage.hidden ? 'Ready offline. Open the extension on a web page to translate.'
     : 'Ready offline. Go back to your page and reopen the extension.');
   requirements.dataset.ready = String(ready);
@@ -136,12 +139,9 @@ function render(): void {
   installBar.hidden = Boolean(active);
   if (active) {
     cancel.disabled = pending || active.saving;
-    progress.value = active.saving ? 1 : active.total ? active.received / active.total : 0;
-    const stepLabel = active.steps > 1 ? ' (' + active.step + ' of ' + active.steps + ')' : '';
-    setText(transferLabel, (active.saving ? 'Saving ' : 'Downloading ') + pairName(active.pack) +
-      stepLabel + (active.saving ? '…' : ''));
-    setText(transferBytes, active.saving ? ''
-      : formatSize(active.received) + ' of ' + formatSize(active.total) + ' · ' + Math.floor(progress.value * 100) + '%');
+    progress.value = downloadProgressRatio(active);
+    setText(transferLabel, formatDownloadLabel(active));
+    setText(transferBytes, active.saving ? '' : formatDownloadBytes(active));
   }
   renderNotice();
   renderInstalled(installed, blocked);
@@ -238,10 +238,6 @@ function icon(name: string): SVGSVGElement {
   return svg;
 }
 
-function total(packs: Pack[], field: 'size' | 'bytes'): number {
-  return packs.reduce((bytes, pack) => bytes + packBytes(pack, field), 0);
-}
-
 function setText(node: Element, text: string): void {
   if (node.textContent !== text) node.textContent = text;
 }
@@ -252,13 +248,7 @@ function renderNotice(): void {
     : notice;
   const failure = state?.failure;
   if (!current && failure && !state?.download && !pending) {
-    const pair = pairName(failure.pack);
-    const text = failure.error === 'storage-failed'
-      ? 'Couldn’t save ' + pair + '. Check available storage and try again.'
-      : failure.error === 'integrity-failed'
-        ? 'The ' + pair + ' download did not pass verification. Try again.'
-        : 'Couldn’t download ' + pair + '. Check the connection and try again.';
-    current = { text, error: true };
+    current = { text: formatDownloadFailure(failure), error: true };
   }
   setText(message, current?.text ?? '');
   message.dataset.error = String(current?.error ?? false);
