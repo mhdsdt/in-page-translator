@@ -363,3 +363,116 @@ test('downloads missing packs directly in popup, supports cancel, and auto-trans
     await expect.poll(popup.status).toMatch(/^Translated to English/);
   });
 });
+
+test('translates select options with explicit values, CSS pseudo-element data-* attributes, button inputs, tooltips, and details', async () => {
+  await withFakePacks(async ({ page, serve, openPopup }) => {
+    await page.goto(serve('/', `<!doctype html><html lang="de"><head><style>
+      #IFeedbackButton::after { content: attr(data-after); }
+    </style></head><body>
+      <form id="controls">
+        <select id="sort-box-select" name="sort" aria-label="Sortieren nach:">
+          <optgroup label="Sortierung">
+            <option value="RELEVANCE_DESC" selected="">Beliebteste zuerst</option>
+            <option value="DISCOUNT_DESC">Größte Ersparnis zuerst</option>
+          </optgroup>
+        </select>
+        <input id="btn-submit" type="submit" value="Suchen">
+        <input id="btn-cancel" type="button" value="Abbrechen">
+        <input id="btn-named" type="submit" name="op" value="Behalten">
+      </form>
+      <button id="IFeedbackButton" type="button" aria-label="Feedback / Meldung" data-after="Feedback / Meldung" data-testid="Untouched id"><span></span></button>
+      <button id="tip-btn" type="button" data-tooltip="Filter öffnen" aria-placeholder="Begriff">OK</button>
+      <details id="more"><summary>Mehr</summary><p id="details-body">Versteckter Text</p></details>
+    </body></html>`), { waitUntil: 'load' });
+
+    const popup = await openPopup();
+    await prepare(popup);
+    await installFake(popup);
+    await popup.click();
+
+    await expect(page.locator('#sort-box-select option[value="RELEVANCE_DESC"]')).toHaveText('«Beliebteste zuerst»');
+    await expect(page.locator('#sort-box-select option[value="DISCOUNT_DESC"]')).toHaveText('«Größte Ersparnis zuerst»');
+    await expect(page.locator('#sort-box-select optgroup')).toHaveAttribute('label', '«Sortierung»');
+    await expect(page.locator('#sort-box-select')).toHaveAttribute('aria-label', '«Sortieren nach:»');
+    expect(await page.evaluate(() => new FormData(document.querySelector<HTMLFormElement>('#controls')!).get('sort'))).toBe('RELEVANCE_DESC');
+
+    await expect(page.locator('#IFeedbackButton')).toHaveAttribute('aria-label', '«Feedback / Meldung»');
+    await expect(page.locator('#IFeedbackButton')).toHaveAttribute('data-after', '«Feedback / Meldung»');
+    await expect(page.locator('#IFeedbackButton')).toHaveAttribute('data-testid', 'Untouched id');
+
+    await expect(page.locator('#btn-submit')).toHaveAttribute('value', '«Suchen»');
+    await expect(page.locator('#btn-cancel')).toHaveAttribute('value', '«Abbrechen»');
+    await expect(page.locator('#btn-named')).toHaveAttribute('value', 'Behalten');
+    await expect(page.locator('#tip-btn')).toHaveAttribute('data-tooltip', '«Filter öffnen»');
+    await expect(page.locator('#tip-btn')).toHaveAttribute('aria-placeholder', '«Begriff»');
+    await expect(page.locator('#more summary')).toHaveText('«Mehr»');
+    await expect(page.locator('#details-body')).toHaveText('Versteckter Text');
+
+    await page.locator('#more').evaluate(node => node.setAttribute('open', ''));
+    await expect(page.locator('#details-body')).toHaveText('«Versteckter Text»');
+
+    await popup.click();
+    await expect(page.locator('#sort-box-select option[value="RELEVANCE_DESC"]')).toHaveText('Beliebteste zuerst');
+    await expect(page.locator('#IFeedbackButton')).toHaveAttribute('aria-label', 'Feedback / Meldung');
+    await expect(page.locator('#IFeedbackButton')).toHaveAttribute('data-after', 'Feedback / Meldung');
+    await expect(page.locator('#btn-submit')).toHaveAttribute('value', 'Suchen');
+  }, ['de:en']);
+});
+
+test('applies dir="auto" for RTL targets and restores original dir on Show original', async () => {
+  await withFakePacks(async ({ page, serve, openPopup }) => {
+    await page.goto(serve('/', `<!doctype html><html lang="en"><body>
+      <p id="plain">Hello world</p>
+      <p id="explicit" dir="ltr">Explicit left to right</p>
+    </body></html>`));
+    const popup = await openPopup();
+    await expect.poll(popup.status).toBe('Choose a different language in To.');
+    await popup.choose('target', 'ar');
+    await installFake(popup);
+    await popup.click();
+
+    await expect(page.locator('#plain')).toHaveText('«Hello world»');
+    await expect(page.locator('#plain')).toHaveAttribute('dir', 'auto');
+    await expect(page.locator('#explicit')).toHaveText('«Explicit left to right»');
+    await expect(page.locator('#explicit')).toHaveAttribute('dir', 'auto');
+
+    await popup.click();
+    await expect(page.locator('#plain')).toHaveText('Hello world');
+    await expect(page.locator('#plain')).not.toHaveAttribute('dir', 'auto');
+    await expect(page.locator('#explicit')).toHaveText('Explicit left to right');
+    await expect(page.locator('#explicit')).toHaveAttribute('dir', 'ltr');
+  }, ['en:ar']);
+});
+
+test('supports swapping languages in popup, updates tab badge, and pushes status updates', async () => {
+  await withFakePacks(async ({ page, serve, openPopup }) => {
+    await page.goto(serve('/', '<html lang="fr"><body><h1>Bonjour</h1></body></html>'));
+    const popup = await openPopup();
+    await prepare(popup);
+    await installFake(popup);
+
+    // Swap French -> English into English -> French.
+    await expect.poll(() => popup.evaluate('document.querySelector("#swap").disabled')).toBe(false);
+    await popup.evaluate('document.querySelector("#swap").click()');
+    expect(await popup.evaluate('document.querySelector("#source").value')).toBe('en');
+    expect(await popup.evaluate('document.querySelector("#target").value')).toBe('fr');
+
+    // Swap back to French -> English and translate.
+    await popup.evaluate('document.querySelector("#swap").click()');
+    expect(await popup.evaluate('document.querySelector("#source").value')).toBe('fr');
+    expect(await popup.evaluate('document.querySelector("#target").value')).toBe('en');
+
+    await popup.click();
+    await expect.poll(popup.status).toMatch(/^Translated to English/);
+
+    const badgeText = () => popup.evaluate<string>(`(async () => {
+      const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+      return chrome.action.getBadgeText({ tabId: tab.id });
+    })()`);
+    await expect.poll(badgeText).toBe('EN');
+
+    await popup.click();
+    await expect.poll(popup.status).toBe('Page is in its original language.');
+    await expect.poll(badgeText).toBe('');
+  }, ['fr:en', 'en:fr']);
+});

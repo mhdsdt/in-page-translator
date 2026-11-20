@@ -1,6 +1,10 @@
 import { takePrefixBatch } from '../shared/batch';
+import { inputs, outputs, routeFor } from '../shared/catalog';
+import { catalogLanguage } from '../shared/languages';
 import { MAX_TRANSLATION_CHARS, OfflineError } from '../shared/offline';
-import type { AutoTranslateTarget, EngineReply, EngineRequest, Pair } from '../shared/offline';
+import type {
+  AutoTranslateTarget, DownloadProgressEvent, EngineReply, EngineRequest, PacksEvent, Pair,
+} from '../shared/offline';
 import { Packs } from './packs';
 import { Translator } from './translator';
 
@@ -11,6 +15,7 @@ interface Job {
 }
 
 const MAX_QUEUED = 128;
+const MAX_WORKERS = (globalThis.navigator?.hardwareConcurrency ?? 1) >= 4 ? 2 : 1;
 const BATCH_LIMITS = { maxItems: 32, maxChars: 2_400 };
 const COALESCE_MS = 4;
 
@@ -27,25 +32,35 @@ const packs = new Packs({
   onPackRemoved(id) {
     translator.evictPack(id);
   },
+  onStatusChange(status, autoTabId) {
+    void chrome.runtime.sendMessage({ type: 'packs-updated', status } satisfies PacksEvent).catch(() => {});
+    if (autoTabId !== undefined) {
+      void chrome.runtime.sendMessage({
+        type: 'download-progress',
+        tabId: autoTabId,
+        download: status.download,
+      } satisfies DownloadProgressEvent).catch(() => {});
+    }
+  },
 });
 
 const queue: Job[] = [];
-let running = false;
+let inFlight = 0;
 let coalesceTimer: number | undefined;
 
 function scheduleDrain(): void {
-  if (running || !queue.length) return;
-  if (batchReady()) {
-    window.clearTimeout(coalesceTimer);
-    coalesceTimer = undefined;
-    void drain();
+  if (inFlight >= MAX_WORKERS || !queue.length) return;
+  if (inFlight === 0 && !batchReady()) {
+    if (coalesceTimer !== undefined) return;
+    coalesceTimer = window.setTimeout(() => {
+      coalesceTimer = undefined;
+      pump();
+    }, COALESCE_MS);
     return;
   }
-  if (coalesceTimer !== undefined) return;
-  coalesceTimer = window.setTimeout(() => {
-    coalesceTimer = undefined;
-    void drain();
-  }, COALESCE_MS);
+  window.clearTimeout(coalesceTimer);
+  coalesceTimer = undefined;
+  pump();
 }
 
 function batchReady(): boolean {
@@ -58,58 +73,79 @@ function batchReady(): boolean {
   return false;
 }
 
-async function drain(): Promise<void> {
-  if (running) return;
-  running = true;
-  try {
-    while (queue.length) {
-      const { pair } = queue[0]!;
-      const batch = takeBatch(pair);
-      let route;
-      try {
-        route = await packs.route(pair);
-      } catch (error) {
-        const reply = failure(error);
-        for (const job of batch) job.reply(reply);
-        continue;
-      }
+function pump(): void {
+  while (queue.length && inFlight < MAX_WORKERS) {
+    const { pair } = queue[0]!;
+    const route = routeFor(pair.from, pair.to);
+    const limit = translator.maxConcurrency(route);
+    if (inFlight >= limit) break;
 
-      try {
-        const translations = await translator.translate(route, batch.map(job => job.text));
-        batch.forEach((job, index) => {
-          const value = translations[index];
-          job.reply(value === undefined ? { ok: false, error: 'engine-unavailable' } : { ok: true, value });
-        });
-      } catch (error) {
-        if (batch.length === 1 || (error instanceof OfflineError &&
-          (error.code === 'missing-packs' || error.code === 'unsupported-pair'))) {
-          const reply = failure(error);
-          for (const job of batch) job.reply(reply);
-          continue;
-        }
-        // Isolate a failing text so it never takes down unrelated siblings in the same batch.
-        for (const job of batch) {
-          try {
-            const [value] = await translator.translate(route, [job.text]);
-            job.reply(value === undefined ? { ok: false, error: 'engine-unavailable' } : { ok: true, value });
-          } catch (itemError) {
-            job.reply(failure(itemError));
-          }
-        }
-      }
+    let samePair = 0;
+    let samePairChars = 0;
+    for (const job of queue) {
+      if (job.pair.from !== pair.from || job.pair.to !== pair.to) break;
+      samePair++;
+      samePairChars += job.text.length;
     }
-  } finally {
-    running = false;
-    if (queue.length) scheduleDrain();
+
+    const limits = limit > 1 && inFlight === 0 && samePair >= 6
+      ? {
+          maxItems: Math.min(16, Math.ceil(samePair / 2)),
+          maxChars: Math.min(1_200, Math.max(400, Math.ceil(samePairChars / 2))),
+        }
+      : BATCH_LIMITS;
+
+    const batch = takeBatch(pair, limits);
+    if (!batch.length) break;
+    inFlight++;
+    void processBatch(pair, batch).finally(() => {
+      inFlight--;
+      if (queue.length) scheduleDrain();
+    });
   }
 }
 
-function takeBatch(pair: Pair): Job[] {
+async function processBatch(pair: Pair, batch: Job[]): Promise<void> {
+  let route;
+  try {
+    route = await packs.route(pair);
+  } catch (error) {
+    const reply = failure(error);
+    for (const job of batch) job.reply(reply);
+    return;
+  }
+
+  try {
+    const translations = await translator.translate(route, batch.map(job => job.text));
+    batch.forEach((job, index) => {
+      const value = translations[index];
+      job.reply(value === undefined ? { ok: false, error: 'engine-unavailable' } : { ok: true, value });
+    });
+  } catch (error) {
+    if (batch.length === 1 || (error instanceof OfflineError &&
+      (error.code === 'missing-packs' || error.code === 'unsupported-pair'))) {
+      const reply = failure(error);
+      for (const job of batch) job.reply(reply);
+      return;
+    }
+    // Isolate a failing text so it never takes down unrelated siblings in the same batch.
+    for (const job of batch) {
+      try {
+        const [value] = await translator.translate(route, [job.text]);
+        job.reply(value === undefined ? { ok: false, error: 'engine-unavailable' } : { ok: true, value });
+      } catch (itemError) {
+        job.reply(failure(itemError));
+      }
+    }
+  }
+}
+
+function takeBatch(pair: Pair, limits: { maxItems: number; maxChars: number }): Job[] {
   const batch = takePrefixBatch(
     queue,
     job => job.pair.from === pair.from && job.pair.to === pair.to,
     job => job.text.length,
-    BATCH_LIMITS,
+    limits,
   );
   queue.splice(0, batch.length);
   return batch;
@@ -124,6 +160,7 @@ chrome.runtime.onMessage.addListener((request: EngineRequest, sender, reply: (re
   const url = sender.url?.split('?')[0];
   const popup = url === chrome.runtime.getURL('popup.html');
   const manager = url === chrome.runtime.getURL('packs.html');
+  const serviceWorker = !sender.tab && url === chrome.runtime.getURL('background.js');
   const content = Boolean(sender.tab) && !popup && !manager;
 
   if (request.type === 'engine-translate' && content) {
@@ -174,9 +211,9 @@ chrome.runtime.onMessage.addListener((request: EngineRequest, sender, reply: (re
   let work: Promise<unknown>;
   if (request.type === 'engine-prepare' && (content || popup)) {
     work = packs.route(request).then(route => translator.prepare(route));
-  } else if (request.type === 'packs-state' && (popup || manager)) {
+  } else if (request.type === 'packs-state' && (popup || manager || serviceWorker)) {
     work = packs.status();
-  } else if (request.type === 'packs-install' && (popup || manager)) {
+  } else if (request.type === 'packs-install' && (popup || manager || serviceWorker)) {
     work = packs.install(request, request.autoTranslate);
   } else if (request.type === 'packs-remove' && manager) {
     work = packs.remove(request.id);
@@ -184,6 +221,17 @@ chrome.runtime.onMessage.addListener((request: EngineRequest, sender, reply: (re
     packs.cancel();
     reply({ ok: true, value: undefined });
     return;
+  } else if (request.type === 'shortcut-translate' && serviceWorker) {
+    const from = catalogLanguage(request.rawSource, inputs);
+    const to = catalogLanguage(request.rawTarget, outputs) ?? 'en';
+    work = !from || from === to || !routeFor(from, to).length
+      ? Promise.reject(new OfflineError('unsupported-pair'))
+      : packs.install({ from, to }, {
+          tabId: request.tabId,
+          documentId: request.documentId,
+          source: from,
+          target: to,
+        });
   } else return;
 
   void work.then(value => reply({ ok: true, value }), error => reply(failure(error)));

@@ -1,4 +1,4 @@
-import { canTranslate, fieldAllowed, readField, writeField } from './surface';
+import { canTranslate, fieldAllowed, isElement, isText, readField, writeField } from './surface';
 import type { Field, Target } from './surface';
 
 export interface Patch {
@@ -12,12 +12,21 @@ export interface Counts {
   failed: number;
 }
 
-// Tracks translated DOM fields, in-flight attempts, busy retries, and lossless restoration.
+const DIR_CONTAINERS = new Set([
+  'p', 'li', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'blockquote', 'dd', 'dt', 'td', 'th',
+  'figcaption', 'caption', 'summary', 'div', 'article', 'section', 'main', 'aside',
+  'header', 'footer', 'label', 'button', 'select',
+]);
+
+// Tracks translated DOM fields, RTL direction overrides, in-flight attempts, and lossless restoration.
 export class PatchLedger {
   private readonly patches = new Map<Target, Map<Field, Patch>>();
+  private readonly dirPatches = new Map<Element, string | null>();
   private readonly attempted = new WeakMap<Target, Map<Field, string>>();
   private readonly busy = new WeakMap<Target, Set<Field>>();
   readonly counts: Counts = { seen: 0, updated: 0, failed: 0 };
+
+  constructor(private readonly targetRtl = false) {}
 
   original(node: Target, field: Field): string | undefined {
     const value = readField(node, field);
@@ -86,6 +95,14 @@ export class PatchLedger {
     fields.set(field, { original, written });
     writeField(node, field, written);
     this.counts.updated++;
+
+    if (this.targetRtl && field === 'text') {
+      const container = dirContainer(node);
+      if (container && !this.dirPatches.has(container)) {
+        this.dirPatches.set(container, container.getAttribute('dir'));
+        container.setAttribute('dir', 'auto');
+      }
+    }
   }
 
   repairNode(node: Target, allowed: boolean): void {
@@ -102,6 +119,10 @@ export class PatchLedger {
     if (!allowed) {
       this.attempted.delete(node);
       for (const field of this.busy.get(node) ?? []) this.clearBusy(node, field);
+      if (isElement(node) && this.dirPatches.has(node)) {
+        restoreDir(node, this.dirPatches.get(node) ?? null);
+        this.dirPatches.delete(node);
+      }
     }
   }
 
@@ -115,6 +136,10 @@ export class PatchLedger {
       }
     }
     this.patches.clear();
+    for (const [element, previous] of this.dirPatches) {
+      restoreDir(element, previous);
+    }
+    this.dirPatches.clear();
   }
 
   private clearBusy(node: Target, field: Field): void {
@@ -126,4 +151,22 @@ export class PatchLedger {
   private undo(node: Target, field: Field, patch: Patch): void {
     if (readField(node, field) === patch.written) writeField(node, field, patch.original);
   }
+}
+
+function dirContainer(node: Target): Element | null {
+  let fallback: Element | null = null;
+  for (let current = isText(node) ? node.parentElement : node; current; current = current.parentElement) {
+    const tag = current.localName;
+    if (tag === 'html' || tag === 'body') break;
+    if (tag === 'option' || tag === 'optgroup') continue;
+    fallback ??= current;
+    if (DIR_CONTAINERS.has(tag)) return current;
+  }
+  return fallback;
+}
+
+function restoreDir(element: Element, previous: string | null): void {
+  if (element.getAttribute('dir') !== 'auto') return;
+  if (previous === null) element.removeAttribute('dir');
+  else element.setAttribute('dir', previous);
 }

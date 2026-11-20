@@ -11,7 +11,7 @@
 <body>
   <svg class="sprite" aria-hidden="true">
     <symbol id="i-arrow-right" viewBox="0 0 16 16"><path d="M3 8h10M9 4l4 4-4 4"/></symbol>
-    <symbol id="i-arrow-down" viewBox="0 0 16 16"><path d="M8 3v10M4 9l4 4 4-4"/></symbol>
+    <symbol id="i-swap" viewBox="0 0 16 16"><path d="M5 3v10M2.5 5.5 5 3l2.5 2.5M11 13V3M8.5 10.5 11 13l2.5-2.5"/></symbol>
     <symbol id="i-undo" viewBox="0 0 16 16"><path d="M5.5 3.5 2.5 6.5l3 3"/><path d="M2.5 6.5h7a4 4 0 0 1 0 8H7"/></symbol>
     <symbol id="i-stop" viewBox="0 0 16 16"><path d="M4 4l8 8M12 4l-8 8"/></symbol>
     <symbol id="i-retry" viewBox="0 0 16 16"><path d="M13.5 8a5.5 5.5 0 1 1-1.6-3.9"/><path d="M13.5 2.5v3h-3"/></symbol>
@@ -42,7 +42,9 @@
           <span class="field-label">From</span>
           <span class="select"><select id="source" disabled></select></span>
         </label>
-        <span class="route-joint" aria-hidden="true"><svg class="icon"><use href="#i-arrow-down"/></svg></span>
+        <button id="swap" class="route-joint" type="button" aria-label="Swap languages" title="Swap languages" disabled>
+          <svg class="icon" aria-hidden="true"><use href="#i-swap"/></svg>
+        </button>
         <label class="lane" for="target">
           <span class="field-label">To</span>
           <span class="select"><select id="target" disabled></select></span>

@@ -4,16 +4,17 @@ import { PatchLedger } from './patches';
 import type { Counts } from './patches';
 import { DomScanner } from './scanner';
 import {
-  eligible, fieldAllowed, fieldsOf, frameDocument, isElement,
-  isText, liveOnPage, policyAttributes, readField, textAttributes,
+  eligible, fieldAllowed, fieldsOf, frameDocument, hasTranslatableDataAttribute,
+  isElement, isText, isTranslatableButtonInput, liveOnPage, policyAttributes,
+  readField, textAttributes,
 } from './surface';
 import type { Field, SurfaceRoot, Target } from './surface';
 import { Viewport } from './viewport';
 import { ShadowDiscovery } from './shadow-discovery';
 
 const SLICE_MS = 6;
-const FIELDS_PER_BATCH = 24;
-const TRANSLATION_LANES = 12;
+const FIELDS_PER_BATCH = 32;
+const TRANSLATION_LANES = 32;
 
 interface Candidate {
   node: Target;
@@ -26,8 +27,9 @@ export class PageSession {
   private readonly seen = new Map<Target, Candidate[]>();
   private readonly slots = new WeakMap<HTMLSlotElement, Node[]>();
   private readonly knownFrames = new WeakSet<Element>();
+  private readonly checkedPseudo = new WeakSet<Element>();
   private readonly pendingRepair = new Set<Node>();
-  private readonly ledger = new PatchLedger();
+  private readonly ledger: PatchLedger;
   private readonly scanner: DomScanner;
   private readonly viewport: Viewport;
   private readonly shadows: ShadowDiscovery;
@@ -38,7 +40,9 @@ export class PageSession {
     private readonly cache: TranslationCache,
     private readonly signal: AbortSignal,
     private readonly report: (counts: Readonly<Counts>, idle: boolean) => void,
+    targetRtl = false,
   ) {
+    this.ledger = new PatchLedger(targetRtl);
     this.scanner = new DomScanner(document, node => this.visit(node));
     this.shadows = new ShadowDiscovery(signal, root => {
       if (!liveOnPage(root, this.document)) return;
@@ -48,7 +52,9 @@ export class PageSession {
     });
     this.viewport = new Viewport(signal, target => {
       if (!eligible(target, this.document)) return;
-      const fields = this.candidates(target);
+      const includePseudo = isElement(target);
+      if (includePseudo) this.checkedPseudo.add(target);
+      const fields = this.candidates(target, includePseudo);
       if (fields.length) {
         this.seen.set(target, fields);
         this.schedule();
@@ -118,6 +124,24 @@ export class PageSession {
         const name = record.attributeName;
         if (name === 'style') {
           styleChanged = true;
+          continue;
+        }
+        if (name === 'value') {
+          if (record.target.localName === 'option') {
+            this.scanner.enqueue(record.target);
+            this.pendingRepair.add(record.target);
+            changed = true;
+          } else if (isTranslatableButtonInput(record.target)) {
+            if (this.onFieldChange(record.target, 'value')) changed = true;
+          }
+          continue;
+        }
+        if (name === 'open') {
+          if (record.target.localName === 'details' || record.target.localName === 'dialog') {
+            this.scanner.enqueue(record.target);
+            styleChanged = true;
+            changed = true;
+          }
           continue;
         }
         if (name === 'class') {
@@ -197,18 +221,19 @@ export class PageSession {
     if (isElement(node)) this.discoverRoots(node);
     if ((isText(node) || isElement(node)) && !this.seen.has(node)) {
       const fields = fieldsOf(node);
-      // Check text eligibility before walking ancestors to skip whitespace-only nodes in O(1).
-      if (fields.length &&
-        fields.some(field => this.ledger.original(node, field) !== undefined) &&
-        eligible(node, this.document)) {
+      const hasStandard = fields.length > 0 && fields.some(field => this.ledger.original(node, field) !== undefined);
+      const needsPseudo = !hasStandard && isElement(node) && !this.checkedPseudo.has(node) &&
+        hasTranslatableDataAttribute(node);
+      // Check text/attribute eligibility before walking ancestors to skip whitespace-only nodes in O(1).
+      if ((hasStandard || needsPseudo) && eligible(node, this.document)) {
         this.viewport.observe(node);
       }
     }
   }
 
-  private candidates(node: Target): Candidate[] {
+  private candidates(node: Target, includePseudo = false): Candidate[] {
     const batch: Candidate[] = [];
-    for (const field of fieldsOf(node)) {
+    for (const field of fieldsOf(node, includePseudo)) {
       const original = this.ledger.original(node, field);
       if (original !== undefined) batch.push({ node, field, original });
     }
@@ -321,6 +346,7 @@ export class PageSession {
     }
     this.ledger.repairNode(node, allowed);
     if (!allowed) {
+      if (isElement(node)) this.checkedPseudo.delete(node);
       this.viewport.forget(node);
       this.seen.delete(node);
     } else if (isText(node)) {

@@ -19,6 +19,11 @@ export type PageRequest =
   | { type: 'start'; source?: string; target: string }
   | { type: 'restore' };
 
+export interface PageEvent {
+  type: 'page-state';
+  state: PageState;
+}
+
 export interface PackSelection {
   documentId: string;
   source: string;

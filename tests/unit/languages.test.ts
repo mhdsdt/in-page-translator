@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { catalogLanguage, languageName, normalizeLanguage, pairName } from '../../src/shared/languages';
+import { catalogLanguage, isRtlLanguage, languageName, normalizeLanguage, pairName } from '../../src/shared/languages';
 
 test('normalizeLanguage canonicalizes scripts, regional variants, and special catalog tags', () => {
   assert.equal(normalizeLanguage(undefined), undefined);
@@ -33,4 +33,16 @@ test('languageName and pairName produce readable English labels', () => {
   assert.equal(languageName('de'), 'German');
   assert.equal(pairName('de:en'), 'German → English');
   assert.equal(pairName('en:fr'), 'English → French');
+});
+
+test('isRtlLanguage identifies right-to-left catalog languages including regional tags', () => {
+  assert.equal(isRtlLanguage('ar'), true);
+  assert.equal(isRtlLanguage('ar-SA'), true);
+  assert.equal(isRtlLanguage('fa'), true);
+  assert.equal(isRtlLanguage('he'), true);
+  assert.equal(isRtlLanguage('ur'), true);
+  assert.equal(isRtlLanguage('ug'), true);
+  assert.equal(isRtlLanguage('en'), false);
+  assert.equal(isRtlLanguage('de'), false);
+  assert.equal(isRtlLanguage(undefined), false);
 });

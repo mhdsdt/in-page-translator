@@ -1,8 +1,9 @@
-import { composedElementParent, isText } from './surface';
+import { composedElementParent, isText, optionSelectOwner } from './surface';
 import type { SurfaceRoot, Target } from './surface';
 
 const STYLE_CHECK_MS = 300;
 const STYLE_CHECK_LIMIT = 96;
+const LOOKAHEAD_PX = 250;
 const boxVisibility = { opacityProperty: true, contentVisibilityAuto: true };
 const fullVisibility = { ...boxVisibility, visibilityProperty: true };
 
@@ -23,7 +24,10 @@ export class Viewport {
     private readonly signal: AbortSignal,
     private readonly onSeen: (target: Target) => void,
   ) {
-    this.observer = new IntersectionObserver(entries => this.onIntersection(entries));
+    this.observer = new IntersectionObserver(
+      entries => this.onIntersection(entries),
+      { rootMargin: `${LOOKAHEAD_PX}px 0px` },
+    );
     window.addEventListener('resize', this.refresh, { signal });
     document.addEventListener('visibilitychange', () => {
       this.refresh();
@@ -43,14 +47,14 @@ export class Viewport {
 
   listen(root: SurfaceRoot, signal: AbortSignal): void {
     root.addEventListener('scroll', this.refresh, { capture: true, passive: true, signal });
-    for (const event of ['focusin', 'focusout', 'animationend', 'transitionend']) {
+    for (const event of ['focusin', 'focusout', 'animationend', 'transitionend', 'toggle']) {
       root.addEventListener(event, this.refreshAll, { capture: true, passive: true, signal });
     }
   }
 
   observe(target: Target, afterExit = false): void {
     if (this.owners.has(target)) return;
-    const element = isText(target) ? composedElementParent(target) : target;
+    const element = optionSelectOwner(target) ?? (isText(target) ? composedElementParent(target) : target);
     if (afterExit) this.waitForExit.add(target);
     if (element) this.add(target, element);
   }
@@ -160,7 +164,7 @@ export class Viewport {
       if (!box.width || !box.height) {
         const style = styleOf(element, styles);
         if (style?.display === 'contents' ||
-          (style && overflowsVisibly(style) && style.opacity !== '0' && this.hasVisibleTextRect(group))) {
+          (style && overflowsVisibly(style) && element.checkVisibility(boxVisibility) && this.hasVisibleTextRect(group))) {
           const parent = composedElementParent(element);
           if (parent && parent !== element) {
             this.reparent(group, parent);
@@ -187,15 +191,18 @@ export class Viewport {
       let hasDeferred = false;
 
       for (const target of [...group]) {
-        const owner = isText(target) ? composedElementParent(target) : target;
+        const viaSelect = optionSelectOwner(target) === element;
+        const owner = viaSelect ? element : isText(target) ? composedElementParent(target) : target;
         const ownerStyle = owner ? styleOf(owner, styles) : null;
-        const styleVisible = rendered && ownerStyle?.visibility === 'visible';
+        const ownerRendered = owner === element ? rendered
+          : Boolean(owner && (ownerStyle?.display === 'contents' || owner.checkVisibility(boxVisibility)));
+        const styleVisible = rendered && ownerRendered && ownerStyle?.visibility === 'visible' && !hiddenInDetails(owner);
         if (!styleVisible) {
           this.hidden.add(element);
           this.waitForExit.delete(target);
           continue;
         }
-        if (isText(target) && !this.textVisible(target, clip, () => {
+        if (!viaSelect && isText(target) && !this.textVisible(target, clip, () => {
           unclippedOverflow ??= entry.intersectionRatio >= 0.999 && overflowsVisibly(styleOf(element, styles));
           return unclippedOverflow;
         })) {
@@ -244,13 +251,15 @@ export class Viewport {
     if (!allowOverflow()) return false;
     const view = text.ownerDocument.defaultView;
     if (!view) return false;
+    const margin = text.ownerDocument === document ? LOOKAHEAD_PX : 0;
     const right = view.innerWidth;
-    const bottom = view.innerHeight;
+    const top = -margin;
+    const bottom = view.innerHeight + margin;
     for (let i = 0; i < rects.length; i++) {
       const rect = rects[i]!;
       if (rect.width > 0 && rect.height > 0 &&
         rect.left < right && rect.right > 0 &&
-        rect.top < bottom && rect.bottom > 0) {
+        rect.top < bottom && rect.bottom > top) {
         return true;
       }
     }
@@ -282,6 +291,12 @@ function styleOf(element: Element, cache: Map<Element, CSSStyleDeclaration | nul
 
 function overflowsVisibly(style: CSSStyleDeclaration | null): boolean {
   return Boolean(style && style.overflowX === 'visible' && style.overflowY === 'visible');
+}
+
+function hiddenInDetails(element: Element | null): boolean {
+  const details = element?.closest('details:not([open])');
+  if (!details) return false;
+  return element?.closest('summary')?.parentElement !== details;
 }
 
 function visibleFrames(doc: Document, cache: Map<Document, boolean>): boolean {

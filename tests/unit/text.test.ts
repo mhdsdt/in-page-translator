@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { MAX_TRANSLATION_CHARS } from '../../src/shared/offline';
-import { splitText } from '../../src/shared/text';
+import { splitText, unquoteCssContent } from '../../src/shared/text';
 
 test('splitText returns empty for empty input and single chunk for short input', () => {
   assert.deepEqual(Array.from(splitText('')), []);
@@ -64,4 +64,18 @@ test('property: splitText is lossless and respects maxChars across 200 randomize
       assert.ok(!(last >= 0xd800 && last <= 0xdbff), 'trailing high surrogate');
     }
   }
+});
+
+test('unquoteCssContent unescapes CSS quoted strings and rejects non-string keywords', () => {
+  assert.equal(unquoteCssContent(undefined), null);
+  assert.equal(unquoteCssContent(null), null);
+  assert.equal(unquoteCssContent(''), null);
+  assert.equal(unquoteCssContent('none'), null);
+  assert.equal(unquoteCssContent('normal'), null);
+  assert.equal(unquoteCssContent('""'), null);
+  assert.equal(unquoteCssContent('"a" "b"'), null);
+  assert.equal(unquoteCssContent('"Feedback / Meldung"'), 'Feedback / Meldung');
+  assert.equal(unquoteCssContent("'Feedback / Meldung'"), 'Feedback / Meldung');
+  assert.equal(unquoteCssContent('"Say \\"hi\\"\\\\ok"'), 'Say "hi"\\ok');
+  assert.equal(unquoteCssContent('"Line 1\\a Line 2"'), 'Line 1\nLine 2');
 });

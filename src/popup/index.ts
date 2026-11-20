@@ -8,8 +8,11 @@ import type { PackSelection, PageRequest, PageState } from '../shared/protocol';
 import { canStartPage, derivePopupView, needsPacksForRoute, resolveSource } from './view';
 import type { ActionKind, Tone } from './view';
 
+const MAX_RECENT_TARGETS = 3;
+
 const source = document.querySelector<HTMLSelectElement>('#source')!;
 const target = document.querySelector<HTMLSelectElement>('#target')!;
+const swap = document.querySelector<HTMLButtonElement>('#swap')!;
 const form = document.querySelector<HTMLFormElement>('#translation')!;
 const action = document.querySelector<HTMLButtonElement>('#action')!;
 const actionLabel = action.querySelector<HTMLSpanElement>('.action-label')!;
@@ -36,8 +39,7 @@ let state: PageState | undefined;
 let detected: string | undefined;
 let detection: 'idle' | 'pending' | 'done' = 'idle';
 let sourceSelection = 'auto';
-let timer: number | undefined;
-let packTimer: number | undefined;
+let recentTargets: string[] = [];
 let sending = false;
 let warmedPair: string | undefined;
 let packStatus: PackStatus | undefined;
@@ -66,7 +68,50 @@ for (const select of [source, target]) {
   });
 }
 
+swap.addEventListener('click', () => {
+  if (swap.disabled || !state) return;
+  const currentFrom = resolveSource(sourceSelection, state.declared, detected);
+  const currentTo = target.value;
+  if (!currentFrom || currentFrom === currentTo || !outputs.includes(currentFrom) || !inputs.includes(currentTo)) return;
+  sourceSelection = currentTo;
+  target.value = currentFrom;
+  downloadError = undefined;
+  if (state.phase === 'error') state = { ...state, phase: 'original', error: undefined };
+  render();
+});
+
 languagePacks.addEventListener('click', () => { void openPacks(); });
+
+chrome.runtime.onMessage.addListener((message: unknown, sender) => {
+  if (sender.id !== chrome.runtime.id || !message || typeof message !== 'object') return;
+  const msg = message as { type?: string; state?: PageState; status?: PackStatus };
+  if (msg.type === 'page-state' && msg.state &&
+    sender.tab?.id === address?.tabId && sender.documentId === address?.documentId) {
+    if (!canStartPage(msg.state) && packStatus?.download) {
+      packStatus = { ...packStatus, download: undefined };
+      wasDownloading = false;
+      void refreshPacks();
+    }
+    accept(msg.state);
+    render();
+  } else if (msg.type === 'packs-updated' && msg.status &&
+    sender.url?.split('?')[0] === chrome.runtime.getURL('offline.html')) {
+    applyPackStatus(msg.status);
+    render();
+  }
+});
+
+chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
+  if (tabId === address?.tabId && changeInfo.status === 'loading') {
+    unavailable('Page changed. Reopen the extension to try again.', 'warn');
+  }
+});
+
+chrome.tabs.onRemoved.addListener(tabId => {
+  if (tabId === address?.tabId) {
+    unavailable('Page changed. Reopen the extension to try again.', 'warn');
+  }
+});
 
 async function openPacks(): Promise<void> {
   if (openingPacks) return;
@@ -89,6 +134,11 @@ async function openPacks(): Promise<void> {
   }
 }
 
+function recordTarget(code: string): void {
+  recentTargets = [code, ...recentTargets.filter(item => item !== code)].slice(0, MAX_RECENT_TARGETS);
+  void chrome.storage.local.set({ targetLanguage: code, recentTargets }).catch(() => {});
+}
+
 function describePage(url: string | undefined): string {
   if (!url) return 'Current page';
   try {
@@ -106,10 +156,20 @@ async function connect(): Promise<void> {
   try {
     const [[tab], preferences] = await Promise.all([
       chrome.tabs.query({ active: true, currentWindow: true }),
-      chrome.storage.local.get('targetLanguage').catch(() => ({})),
+      chrome.storage.local.get(['targetLanguage', 'recentTargets']).catch(() => ({})),
     ]);
-    const saved = (preferences as { targetLanguage?: string }).targetLanguage;
-    target.value = catalogLanguage(saved, outputs) ?? target.value;
+    const prefs = preferences as { targetLanguage?: string; recentTargets?: unknown };
+    const savedRecents = Array.isArray(prefs.recentTargets)
+      ? prefs.recentTargets.filter((c): c is string => typeof c === 'string' && outputs.includes(c)).slice(0, MAX_RECENT_TARGETS)
+      : [];
+    if (savedRecents.length) {
+      recentTargets = savedRecents;
+      const defaultTarget = target.value;
+      target.replaceChildren();
+      fillLanguages(target, outputs, recentTargets);
+      target.value = defaultTarget;
+    }
+    target.value = catalogLanguage(prefs.targetLanguage, outputs) ?? target.value;
     site.textContent = describePage(tab?.url);
     if (tab?.id === undefined || !/^(https?|file):/u.test(tab.url ?? '')) {
       unavailable('Chrome restricts translation on this page. Try a web page in another tab.', 'off');
@@ -139,26 +199,25 @@ async function connect(): Promise<void> {
   }
 }
 
+function applyPackStatus(packs: PackStatus): void {
+  const finishedDownload = wasDownloading && !packs.download;
+  packStatus = packs;
+  installed = new Set(packs.installed);
+  wasDownloading = Boolean(packs.download);
+  if (packs.download) {
+    downloadError = undefined;
+  } else if (finishedDownload) {
+    if (packs.failure) {
+      downloadError = formatDownloadFailure(packs.failure);
+    } else if (address && state) {
+      void syncPageStatus();
+    }
+  }
+}
+
 function refreshPacks(): Promise<void> {
-  window.clearTimeout(packTimer);
-  packTimer = undefined;
   packRefresh ??= engineRequest({ type: 'packs-state' })
-    .then(packs => {
-      const finishedDownload = wasDownloading && !packs.download;
-      packStatus = packs;
-      installed = new Set(packs.installed);
-      wasDownloading = Boolean(packs.download);
-      if (packs.download) {
-        downloadError = undefined;
-        packTimer = window.setTimeout(() => { void refreshPacks(); }, 250);
-      } else if (finishedDownload) {
-        if (packs.failure) {
-          downloadError = formatDownloadFailure(packs.failure);
-        } else if (address && state) {
-          void poll();
-        }
-      }
-    })
+    .then(packs => applyPackStatus(packs))
     .catch(() => {
       packStatus = undefined;
       installed = undefined;
@@ -199,6 +258,18 @@ function send(request: PageRequest): Promise<PageState> {
   return chrome.tabs.sendMessage(address.tabId, request, { documentId: address.documentId });
 }
 
+async function syncPageStatus(): Promise<void> {
+  const before = state;
+  try {
+    const next = await send({ type: 'status' });
+    if (state !== before || sending) return;
+    accept(next);
+    render();
+  } catch {
+    if (state === before && !sending) unavailable('Page changed. Reopen the extension to try again.', 'warn');
+  }
+}
+
 async function submit(): Promise<void> {
   if (!state || !address || action.disabled || openingPacks) return;
 
@@ -223,7 +294,7 @@ async function submit(): Promise<void> {
     downloadError = undefined;
     sending = true;
     render();
-    void chrome.storage.local.set({ targetLanguage: desiredTarget }).catch(() => {});
+    recordTarget(desiredTarget);
     if (resumedSelection) {
       void chrome.storage.session.remove(packSelectionKey(address.tabId)).catch(() => {});
       resumedSelection = false;
@@ -255,18 +326,16 @@ async function submit(): Promise<void> {
 
   downloadError = undefined;
   sending = true;
-  cancelPoll();
   render();
   try {
     accept(await send(starting
       ? { type: 'start', source: from, target: desiredTarget }
       : { type: 'restore' }));
     if (starting) {
-      void chrome.storage.local.set({ targetLanguage: desiredTarget }).catch(() => {});
+      recordTarget(desiredTarget);
       if (resumedSelection) void chrome.storage.session.remove(packSelectionKey(address.tabId)).catch(() => {});
       resumedSelection = false;
     }
-    schedulePoll();
   } catch {
     unavailable('Page changed. Reopen the extension to try again.', 'warn');
   } finally {
@@ -275,37 +344,10 @@ async function submit(): Promise<void> {
   }
 }
 
-function schedulePoll(): void {
-  if (timer !== undefined || !state || canStartPage(state)) return;
-  timer = window.setTimeout(() => { void poll(); }, state.phase === 'translated' ? 1_000 : 200);
-}
-
-function cancelPoll(): void {
-  if (timer !== undefined) window.clearTimeout(timer);
-  timer = undefined;
-}
-
-async function poll(): Promise<void> {
-  timer = undefined;
-  // A submit can race an in-flight poll. The poll must then discard its old snapshot.
-  const before = state;
-  try {
-    const next = await send({ type: 'status' });
-    if (state !== before || sending) return;
-    accept(next);
-    render();
-  } catch {
-    if (state === before && !sending) unavailable('Page changed. Reopen the extension to try again.', 'warn');
-  }
-}
-
 function unavailable(message: string, tone: Tone): void {
   address = undefined;
   state = undefined;
-  cancelPoll();
-  window.clearTimeout(packTimer);
-  packTimer = undefined;
-  source.disabled = target.disabled = action.disabled = true;
+  source.disabled = target.disabled = swap.disabled = action.disabled = true;
   readiness.hidden = true;
   panel.dataset.progress = 'false';
   updateStatus(message, tone);
@@ -337,6 +379,7 @@ function render(): void {
   const automatic = source.options.item(0);
   if (automatic) automatic.text = view.autoLabel;
   source.disabled = target.disabled = view.selectsDisabled;
+  swap.disabled = !view.canSwap;
 
   action.disabled = view.actionDisabled;
   setAction(view.actionKind, view.actionLabel);
@@ -360,7 +403,6 @@ function render(): void {
       void requestEngine({ type: 'engine-prepare', ...view.warmPair }).catch(() => {});
     }
   }
-  if (view.pollPage) schedulePoll();
 }
 
 function updateStatus(message: string, tone: Tone): void {

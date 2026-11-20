@@ -1,4 +1,4 @@
-import { formatSize, inputs, routeFor } from '../shared/catalog';
+import { formatSize, inputs, outputs, routeFor } from '../shared/catalog';
 import type { Pack } from '../shared/catalog';
 import {
   downloadProgressRatio, formatDownloadBytes, formatDownloadLabel, totalPackBytes,
@@ -29,6 +29,7 @@ export interface PopupView {
   targetValue: string;
   autoLabel: string;
   selectsDisabled: boolean;
+  canSwap: boolean;
   actionKind: ActionKind;
   actionLabel: string;
   actionDisabled: boolean;
@@ -40,7 +41,6 @@ export interface PopupView {
   readinessText: string;
   readinessTone: ReadinessTone;
   warmPair?: Pair;
-  pollPage: boolean;
 }
 
 const errors: Record<PageError, string> = {
@@ -98,6 +98,9 @@ export function derivePopupView(input: PopupViewInput): PopupView {
   const detecting = starting && effectiveSourceSelection === 'auto' && !page.declared && detection === 'pending';
 
   const selectsDisabled = sending || !starting || Boolean(activeDownload);
+  const canSwap = !selectsDisabled && Boolean(
+    from && from !== targetValue && outputs.includes(from) && inputs.includes(targetValue),
+  );
 
   if (activeDownload) {
     const ratio = downloadProgressRatio(activeDownload);
@@ -106,6 +109,7 @@ export function derivePopupView(input: PopupViewInput): PopupView {
       targetValue,
       autoLabel,
       selectsDisabled,
+      canSwap: false,
       actionKind: 'cancel',
       actionLabel: 'Cancel download',
       actionDisabled: sending || activeDownload.saving,
@@ -118,7 +122,6 @@ export function derivePopupView(input: PopupViewInput): PopupView {
         ? 'Verifying and saving to device…'
         : formatDownloadBytes(activeDownload),
       readinessTone: 'progress',
-      pollPage: false,
     };
   }
 
@@ -186,6 +189,7 @@ export function derivePopupView(input: PopupViewInput): PopupView {
     targetValue,
     autoLabel,
     selectsDisabled,
+    canSwap,
     actionKind,
     actionLabel,
     actionDisabled,
@@ -197,7 +201,6 @@ export function derivePopupView(input: PopupViewInput): PopupView {
     readinessText,
     readinessTone,
     warmPair,
-    pollPage: !starting,
   };
 }
 

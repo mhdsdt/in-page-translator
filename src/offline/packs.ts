@@ -15,10 +15,12 @@ export interface PackHooks {
   onPackSaved?: (pack: Pack, buffers: ModelBuffers, hasAutoTranslate: boolean) => void;
   onAutoTranslate?: (target: AutoTranslateTarget) => Promise<void>;
   onPackRemoved?: (id: string) => void;
+  onStatusChange?: (status: PackStatus, autoTabId?: number) => void;
 }
 
 export class Packs {
   private installed?: Promise<Set<string>>;
+  private installedCache = new Set<string>();
   private active?: Download;
   private removing = false;
   private failure?: PackStatus['failure'];
@@ -26,11 +28,8 @@ export class Packs {
   constructor(private readonly hooks: PackHooks = {}) {}
 
   async status(): Promise<PackStatus> {
-    return {
-      installed: [...await this.getInstalled()],
-      download: this.active ? { ...this.active.state } : undefined,
-      failure: this.failure,
-    };
+    await this.getInstalled();
+    return this.snapshot();
   }
 
   async route(pair: Pair): Promise<Pack[]> {
@@ -59,12 +58,12 @@ export class Packs {
       autoTranslate,
     };
     this.active = job;
+    this.emit(job.autoTranslate?.tabId);
     void this.installPacks(missing, installed, job);
   }
 
   cancel(): void {
     if (this.active && !this.active.state.saving) {
-      this.active.autoTranslate = undefined;
       this.active.controller.abort();
     }
   }
@@ -79,6 +78,7 @@ export class Packs {
       await removePack(pack);
       installed.delete(id);
       this.hooks.onPackRemoved?.(id);
+      this.emit();
     } catch {
       throw new OfflineError('storage-failed');
     } finally {
@@ -87,27 +87,44 @@ export class Packs {
   }
 
   private getInstalled(): Promise<Set<string>> {
-    this.installed ??= installedPacks().catch(() => {
-      this.installed = undefined;
-      throw new OfflineError('storage-failed');
-    });
+    this.installed ??= installedPacks()
+      .then(set => {
+        this.installedCache = set;
+        return set;
+      })
+      .catch(() => {
+        this.installed = undefined;
+        throw new OfflineError('storage-failed');
+      });
     return this.installed;
   }
 
+  private snapshot(): PackStatus {
+    return {
+      installed: [...this.installedCache],
+      download: this.active ? { ...this.active.state } : undefined,
+      failure: this.failure,
+    };
+  }
+
+  private emit(autoTabId = this.active?.autoTranslate?.tabId): void {
+    this.hooks.onStatusChange?.(this.snapshot(), autoTabId);
+  }
+
   private async installPacks(route: Pack[], installed: Set<string>, job: Download): Promise<void> {
+    const autoTabId = job.autoTranslate?.tabId;
     try {
       for (let index = 0; index < route.length; index++) {
         const pack = route[index]!;
         job.state = progressFor(pack, index + 1, route.length);
-        const buffers = await download(pack, job);
+        this.emit(autoTabId);
+        const buffers = await download(pack, job, () => this.emit(autoTabId));
         job.controller.signal.throwIfAborted();
         job.state.saving = true;
+        this.emit(autoTabId);
         await writePack(pack, buffers);
         installed.add(pack.id);
         this.hooks.onPackSaved?.(pack, buffers, Boolean(job.autoTranslate));
-      }
-      if (job.autoTranslate && !job.controller.signal.aborted) {
-        await this.hooks.onAutoTranslate?.(job.autoTranslate).catch(() => {});
       }
     } catch (error) {
       if (!job.controller.signal.aborted) {
@@ -119,6 +136,10 @@ export class Packs {
       }
     } finally {
       this.active = undefined;
+      this.emit(autoTabId);
+      if (job.autoTranslate && !this.failure && !job.controller.signal.aborted) {
+        await this.hooks.onAutoTranslate?.(job.autoTranslate).catch(() => {});
+      }
     }
   }
 }
@@ -133,7 +154,7 @@ function progressFor(pack: Pack, step: number, steps: number): DownloadStatus {
   return { pack: pack.id, received: 0, total: packBytes(pack, 'size'), saving: false, step, steps };
 }
 
-async function download(pack: Pack, job: Download): Promise<ModelBuffers> {
+async function download(pack: Pack, job: Download, onProgress: () => void): Promise<ModelBuffers> {
   const { signal } = job.controller;
   signal.throwIfAborted();
   const worker = new Worker('download.js');
@@ -142,9 +163,14 @@ async function download(pack: Pack, job: Download): Promise<ModelBuffers> {
       signal.addEventListener('abort', () => reject(signal.reason), { once: true });
       worker.addEventListener('error', () => reject(new Error('Download worker stopped')), { once: true });
       worker.addEventListener('message', ({ data }: MessageEvent<DownloadReply>) => {
-        if (data.type === 'progress') job.state.received = data.received;
-        else if (data.type === 'complete') resolve(data.buffers);
-        else reject(new OfflineError(data.error));
+        if (data.type === 'progress') {
+          job.state.received = data.received;
+          onProgress();
+        } else if (data.type === 'complete') {
+          resolve(data.buffers);
+        } else {
+          reject(new OfflineError(data.error));
+        }
       });
       worker.postMessage({ assets: pack.assets } satisfies DownloadRequest);
     });

@@ -48,7 +48,22 @@ interface Calls {
   'packs-install': { request: Pair & { autoTranslate?: AutoTranslateTarget }; result: void };
   'packs-cancel': { request: object; result: void };
   'packs-remove': { request: { id: string }; result: void };
+  'shortcut-translate': {
+    request: { tabId: number; documentId: string; rawSource?: string; rawTarget?: string };
+    result: void;
+  };
   'auto-translate-ready': { request: { target: AutoTranslateTarget }; result: void };
+}
+
+export interface PacksEvent {
+  type: 'packs-updated';
+  status: PackStatus;
+}
+
+export interface DownloadProgressEvent {
+  type: 'download-progress';
+  tabId: number;
+  download?: DownloadStatus;
 }
 
 export type EngineRequest = {

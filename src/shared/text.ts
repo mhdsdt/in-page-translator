@@ -52,3 +52,44 @@ export function* splitText(
   }
   if (start < text.length) yield text.slice(start);
 }
+
+// Parse a computed CSS `content` value when it represents a single quoted string.
+export function unquoteCssContent(raw: string | null | undefined): string | null {
+  if (!raw) return null;
+  const trimmed = raw.trim();
+  if (trimmed.length < 2 || trimmed === 'none' || trimmed === 'normal') return null;
+  const quote = trimmed[0];
+  if ((quote !== '"' && quote !== "'") || trimmed[trimmed.length - 1] !== quote) return null;
+
+  const inner = trimmed.slice(1, -1);
+  let out = '';
+  for (let i = 0; i < inner.length; i++) {
+    const ch = inner[i]!;
+    if (ch === quote) return null;
+    if (ch !== '\\') {
+      out += ch;
+      continue;
+    }
+    if (i + 1 >= inner.length) break;
+    const next = inner[++i]!;
+    if (next === '\n' || next === '\r' || next === '\f') {
+      if (next === '\r' && inner[i + 1] === '\n') i++;
+      continue;
+    }
+    if (/^[0-9a-fA-F]$/u.test(next)) {
+      let hex = next;
+      while (hex.length < 6 && i + 1 < inner.length && /^[0-9a-fA-F]$/u.test(inner[i + 1]!)) {
+        hex += inner[++i]!;
+      }
+      if (i + 1 < inner.length && /^[ \t\r\n\f]$/u.test(inner[i + 1]!)) {
+        if (inner[i + 1] === '\r' && inner[i + 2] === '\n') i += 2;
+        else i++;
+      }
+      const code = Number.parseInt(hex, 16);
+      if (code > 0 && code <= 0x10ffff) out += String.fromCodePoint(code);
+      continue;
+    }
+    out += next;
+  }
+  return out.length ? out : null;
+}

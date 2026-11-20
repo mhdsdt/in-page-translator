@@ -1,6 +1,6 @@
-import { normalizeLanguage } from '../shared/languages';
+import { isRtlLanguage, normalizeLanguage } from '../shared/languages';
 import { OfflineError } from '../shared/offline';
-import type { PageError, PageRequest, PageState } from '../shared/protocol';
+import type { PageError, PageEvent, PageRequest, PageState } from '../shared/protocol';
 import { openEngine, TranslationCache } from './engine';
 import { PageSession } from './session';
 
@@ -24,12 +24,17 @@ function install(): void {
 
   const declared = () => normalizeLanguage(document.documentElement?.lang);
   const snapshot = (): PageState => ({ ...state, declared: declared() });
+  const notify = () => {
+    const event: PageEvent = { type: 'page-state', state: snapshot() };
+    void chrome.runtime.sendMessage(event).catch(() => {});
+  };
 
   async function start(source: string | undefined, target: string): Promise<void> {
     if (active || state.phase === 'restoring') return;
     state = { phase: 'error', source, target, updated: 0, failed: 0 };
     if (!source || source === target) {
       state.error = source ? 'same-language' : 'language-unknown';
+      notify();
       return;
     }
 
@@ -38,12 +43,14 @@ function install(): void {
     active = run;
     const { signal } = controller;
     state = { ...state, phase: 'preparing' };
+    notify();
 
     function fail(error: PageError): void {
       if (active !== run) return;
       active = undefined;
       controller.abort();
       state = { phase: 'error', source, target, updated: 0, failed: 0, error };
+      notify();
     }
 
     const watchdog = window.setTimeout(() => fail('engine-unavailable'), SETUP_TIMEOUT_MS);
@@ -52,18 +59,26 @@ function install(): void {
       const engine = await openEngine({ from: source, to: target }, signal);
       if (signal.aborted) return;
       state = { phase: 'translating', source, target, updated: 0, failed: 0 };
-      run.session = new PageSession(document, new TranslationCache(engine, signal), signal, (counts, idle) => {
-        if (active !== run) return;
-        state.updated = counts.updated;
-        state.failed = counts.failed;
-        if (idle) {
-          state.phase = 'translated';
-          state.error = counts.seen === 0 ? 'no-text'
-            : counts.seen === counts.failed ? 'translation-failed' : undefined;
-        } else if (counts.seen) {
-          state.error = undefined;
-        }
-      });
+      notify();
+      run.session = new PageSession(
+        document,
+        new TranslationCache(engine, signal),
+        signal,
+        (counts, idle) => {
+          if (active !== run) return;
+          state.updated = counts.updated;
+          state.failed = counts.failed;
+          if (idle) {
+            state.phase = 'translated';
+            state.error = counts.seen === 0 ? 'no-text'
+              : counts.seen === counts.failed ? 'translation-failed' : undefined;
+          } else if (counts.seen) {
+            state.error = undefined;
+          }
+          notify();
+        },
+        isRtlLanguage(target),
+      );
       run.session.start();
     } catch (error) {
       fail(error instanceof OfflineError && (error.code === 'missing-packs' || error.code === 'unsupported-pair')
@@ -79,8 +94,10 @@ function install(): void {
     active = undefined;
     previous?.controller.abort();
     state.phase = 'restoring';
+    notify();
     await previous?.session?.restore();
     state = { phase: 'original', updated: 0, failed: 0 };
+    notify();
   }
 
   chrome.runtime.onMessage.addListener((request: PageRequest, sender, reply) => {

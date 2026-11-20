@@ -14,7 +14,8 @@ test('translates the page in place, observes new text and restores the latest or
         <button id="button" aria-label="Ajouter au panier">Ajouter</button>
         <input id="query" placeholder="Chercher" value="Texte saisi">
         <textarea id="notes" placeholder="Écrire ici">Texte du brouillon</textarea>
-        <select><option selected value="fr">Français</option></select>
+        <select id="valued"><option selected value="fr">Français</option></select>
+        <select id="valueless"><option selected>Français natif</option></select>
         <p translate="no">Laisser intact</p>
         <p contenteditable>Mon brouillon</p>
         <code>document.querySelector</code>
@@ -41,7 +42,9 @@ test('translates the page in place, observes new text and restores the latest or
     await expect(page.locator('#query')).toHaveValue('Texte saisi');
     await expect(page.locator('#notes')).toHaveAttribute('placeholder', '«Écrire ici»');
     await expect(page.locator('#notes')).toHaveValue('Texte du brouillon');
-    await expect(page.locator('option')).toHaveText('Français');
+    await expect(page.locator('#valued option')).toHaveText('«Français»');
+    await expect(page.locator('#valued')).toHaveValue('fr');
+    await expect(page.locator('#valueless option')).toHaveText('Français natif');
     await expect(page.locator('[translate=no]')).toHaveText('Laisser intact');
     await expect(page.locator('[contenteditable]')).toHaveText('Mon brouillon');
     await expect(page.locator('code')).toHaveText('document.querySelector');
@@ -83,6 +86,8 @@ test('translates the page in place, observes new text and restores the latest or
     await expect(page.locator('#button')).toHaveAttribute('aria-label', 'Voir le panier');
     await detached.evaluate(node => document.body.append(node));
     await expect(page.locator('#live')).toHaveText('Nouvelles locales');
+    await expect(page.locator('#valued option')).toHaveText('Français');
+    await expect(page.locator('#valueless option')).toHaveText('Français natif');
     await expect(page.frameLocator('#article').locator('#nested')).toHaveText('Autre document');
     await expect(page).toHaveTitle('Le journal');
   });

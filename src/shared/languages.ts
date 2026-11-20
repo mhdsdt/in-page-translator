@@ -1,3 +1,5 @@
+const RTL_LANGUAGES = new Set(['ar', 'dv', 'fa', 'he', 'ku', 'ps', 'sd', 'ug', 'ur', 'yi']);
+
 export function normalizeLanguage(value: string | undefined): string | undefined {
   if (!value) return undefined;
   try {
@@ -15,6 +17,11 @@ export function normalizeLanguage(value: string | undefined): string | undefined
   } catch {
     return undefined;
   }
+}
+
+export function isRtlLanguage(code: string | undefined): boolean {
+  const normalized = normalizeLanguage(code) ?? code?.split('-')[0]?.toLowerCase();
+  return Boolean(normalized && RTL_LANGUAGES.has(normalized));
 }
 
 export function catalogLanguage(value: string | undefined, supported: readonly string[]): string | undefined {
@@ -36,7 +43,33 @@ export function pairName(id: string): string {
   return id.split(':').map(languageName).join(' \u2192 ');
 }
 
-export function fillLanguages(select: HTMLSelectElement, codes: string[]): void {
+export function fillLanguages(select: HTMLSelectElement, codes: string[], recent?: readonly string[]): void {
+  const validCodes = new Set(codes);
+  const recentCodes: string[] = [];
+  if (recent) {
+    for (const code of recent) {
+      if (validCodes.has(code) && !recentCodes.includes(code)) recentCodes.push(code);
+    }
+  }
+
+  if (recentCodes.length) {
+    const recentSet = new Set(recentCodes);
+    const recentGroup = document.createElement('optgroup');
+    recentGroup.label = 'Recent';
+    recentGroup.append(...recentCodes.map(code => new Option(languageName(code), code)));
+
+    const restOptions = codes
+      .filter(code => !recentSet.has(code))
+      .map(code => new Option(languageName(code), code))
+      .sort((a, b) => a.text.localeCompare(b.text, 'en'));
+    const allGroup = document.createElement('optgroup');
+    allGroup.label = 'All languages';
+    allGroup.append(...restOptions);
+
+    select.append(recentGroup, allGroup);
+    return;
+  }
+
   const options = codes.map(code => new Option(languageName(code), code));
   options.sort((a, b) => a.text.localeCompare(b.text, 'en'));
   select.append(...options);

@@ -1,10 +1,18 @@
-export const textAttributes = ['alt', 'aria-label', 'aria-description', 'title', 'placeholder', 'label'] as const;
-export const policyAttributes = ['class', 'hidden', 'contenteditable', 'translate'] as const;
+import { unquoteCssContent } from '../shared/text';
+
+export const textAttributes = [
+  'alt', 'aria-label', 'aria-description', 'aria-placeholder', 'aria-roledescription', 'aria-valuetext',
+  'title', 'placeholder', 'label',
+  'data-tooltip', 'data-tip', 'data-original-title', 'data-bs-title', 'data-bs-original-title', 'data-bs-content',
+] as const;
+export const policyAttributes = ['class', 'hidden', 'contenteditable', 'translate', 'value', 'open'] as const;
 
 type Attribute = typeof textAttributes[number];
-export type Field = 'text' | Attribute;
+export type Field = 'text' | 'value' | Attribute | `data-${string}`;
 export type SurfaceRoot = Document | ShadowRoot;
 export type Target = Text | Element;
+
+const TEXT_ATTRIBUTE_SET = new Set<string>(textAttributes);
 
 const SKIP_TAGS = new Set([
   'head', 'script', 'style', 'noscript', 'template', 'code', 'pre', 'kbd', 'samp',
@@ -27,6 +35,21 @@ export function isSkippedElement(element: Element): boolean {
     if (mode === '' || mode === 'true' || mode === 'plaintext-only') return true;
   }
   return false;
+}
+
+export function isTranslatableButtonInput(element: Element): boolean {
+  if (element.localName !== 'input' || !element.hasAttribute('value')) return false;
+  const type = (element.getAttribute('type') ?? 'text').toLowerCase();
+  if (type === 'button' || type === 'reset') return true;
+  return type === 'submit' && !element.hasAttribute('name');
+}
+
+export function optionSelectOwner(node: Target): HTMLSelectElement | null {
+  if (isText(node)) return node.parentElement?.closest('option')?.closest('select') ?? null;
+  if (isElement(node) && (node.localName === 'option' || node.localName === 'optgroup')) {
+    return node.closest('select');
+  }
+  return null;
 }
 
 export function frameDocument(frame: Element): Document | null {
@@ -85,14 +108,63 @@ function owningDocument(node: Node): Document | null {
   return node.nodeType === Node.DOCUMENT_NODE ? node as Document : node.ownerDocument;
 }
 
-export function fieldsOf(node: Node): readonly Field[] {
+export function hasTranslatableDataAttribute(element: Element): boolean {
+  if (!element.hasAttributes()) return false;
+  for (const attr of element.attributes) {
+    if (attr.name.startsWith('data-') && !TEXT_ATTRIBUTE_SET.has(attr.name) && canTranslate(attr.value)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+export function pseudoContentDataAttributes(element: Element): readonly `data-${string}`[] {
+  if (!element.hasAttributes()) return NO_FIELDS;
+  const view = element.ownerDocument.defaultView;
+  if (!view) return NO_FIELDS;
+
+  const contents: string[] = [];
+  for (const pseudo of ['::before', '::after'] as const) {
+    const value = unquoteCssContent(view.getComputedStyle(element, pseudo).content);
+    if (value) contents.push(value);
+  }
+  if (!contents.length) return NO_FIELDS;
+
+  const matched: `data-${string}`[] = [];
+  for (const attr of element.attributes) {
+    if (
+      attr.name.startsWith('data-') &&
+      !TEXT_ATTRIBUTE_SET.has(attr.name) &&
+      canTranslate(attr.value) &&
+      contents.includes(attr.value)
+    ) {
+      matched.push(attr.name as `data-${string}`);
+    }
+  }
+  return matched;
+}
+
+export function fieldsOf(node: Node, includePseudo = false): readonly Field[] {
   if (isText(node)) return fieldAllowed(node, 'text') ? TEXT_FIELD : NO_FIELDS;
   if (!isElement(node) || !node.hasAttributes()) return NO_FIELDS;
-  return textAttributes.filter(attribute => node.hasAttribute(attribute));
+  const fields: Field[] = textAttributes.filter(attribute => node.hasAttribute(attribute));
+  if (isTranslatableButtonInput(node)) fields.push('value');
+  if (includePseudo) {
+    const pseudo = pseudoContentDataAttributes(node);
+    if (pseudo.length) fields.push(...pseudo);
+  }
+  return fields;
 }
 
 export function fieldAllowed(node: Target, field: Field): boolean {
-  return field !== 'text' || (isText(node) && !node.parentElement?.closest('textarea, option'));
+  if (field === 'value') return isElement(node) && isTranslatableButtonInput(node);
+  if (field !== 'text') return true;
+  if (!isText(node)) return false;
+  const parent = node.parentElement;
+  if (parent?.closest('textarea')) return false;
+  const option = parent?.closest('option');
+  if (option && (!option.hasAttribute('value') || !option.closest('select'))) return false;
+  return true;
 }
 
 const NO_FIELDS = [] as const;

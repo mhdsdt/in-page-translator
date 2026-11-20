@@ -26,5 +26,13 @@
     "32": "icons/32.png",
     "48": "icons/48.png",
     "128": "icons/128.png"
+  },
+  "commands": {
+    "toggle-translation": {
+      "suggested_key": {
+        "default": "Alt+Shift+T"
+      },
+      "description": "Translate or restore the current page"
+    }
   }
 }

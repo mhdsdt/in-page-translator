@@ -39,7 +39,6 @@ to.value = outputs.includes(preferredTarget) ? preferredTarget : from.value === 
 let state: PackStatus | undefined;
 let pending = false;
 let refreshing: Promise<void> | undefined;
-let timer: number | undefined;
 let listKey: string | undefined;
 let routeKey: string | undefined;
 let seen: Set<string> | undefined;
@@ -72,6 +71,17 @@ cancel.addEventListener('click', () => {
 for (const select of [from, to]) select.addEventListener('change', render);
 window.addEventListener('focus', () => { void refresh(); });
 
+chrome.runtime.onMessage.addListener((msg: unknown, sender) => {
+  if (sender.id !== chrome.runtime.id || !msg || typeof msg !== 'object') return;
+  if (sender.url?.split('?')[0] !== chrome.runtime.getURL('offline.html')) return;
+  const event = msg as { type?: string; status?: PackStatus };
+  if (event.type === 'packs-updated' && event.status) {
+    state = event.status;
+    readFailed = false;
+    render();
+  }
+});
+
 render();
 void refresh();
 
@@ -81,7 +91,6 @@ function refresh(): Promise<void> {
 }
 
 async function readState(): Promise<void> {
-  window.clearTimeout(timer);
   try {
     state = await engineRequest({ type: 'packs-state' });
     readFailed = false;
@@ -90,7 +99,6 @@ async function readState(): Promise<void> {
     readFailed = true;
   } finally {
     render();
-    if (state?.download) timer = window.setTimeout(() => { void refresh(); }, 250);
   }
 }
 

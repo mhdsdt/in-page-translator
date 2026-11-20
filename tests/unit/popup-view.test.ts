@@ -21,10 +21,10 @@ test('derivePopupView: ready installed pair enables Translate page and requests 
   assert.equal(view.actionKind, 'translate');
   assert.equal(view.actionLabel, 'Translate page');
   assert.equal(view.actionDisabled, false);
+  assert.equal(view.canSwap, true);
   assert.equal(view.tone, 'idle');
   assert.equal(view.readinessText, 'Ready offline');
   assert.deepEqual(view.warmPair, { from: 'de', to: 'en' });
-  assert.equal(view.pollPage, false);
 });
 
 test('derivePopupView: missing pack offers direct Download & translate with download size', () => {
@@ -83,8 +83,11 @@ test('derivePopupView: handles same-language, unknown source, retry, translating
   }));
   assert.equal(translating.actionKind, 'cancel');
   assert.equal(translating.actionLabel, 'Cancel and restore');
-  assert.equal(translating.pollPage, true);
+  assert.equal(translating.canSwap, false);
   assert.equal(translating.statusText, 'Translating… 14 updates');
+
+  const sameSwap = derivePopupView(base({ sourceSelection: 'auto', page: { phase: 'original', declared: 'en', updated: 0, failed: 0 } }));
+  assert.equal(sameSwap.canSwap, false);
 
   const partial = derivePopupView(base({
     page: { phase: 'translated', source: 'de', target: 'en', updated: 10, failed: 2 },

@@ -13,10 +13,10 @@ Layer rules are enforced statically via TypeScript AST analysis in [scripts/veri
 
 | Layer | Owns | Allowed imports | Restrictions |
 | --- | --- | --- | --- |
-| `src/shared/` | Types, model catalog & routing, language normalization, text chunking, char-budgeted batching, shared UI formatting, thin RPC helper | `shared` | Pure modules (except `offline.ts`) may not touch `chrome.*` |
-| `src/page/` | Isolated content script: TreeWalker DOM scanning (`scanner.ts`), viewport/overflow visibility (`viewport.ts`), late shadow-root discovery (`shadow-discovery.ts`), patch ledger (`patches.ts`), microtask-batched IPC & LRU cache (`engine.ts`), session orchestration (`session.ts`) | `page`, `shared` | No `fetch`, `XMLHttpRequest`, or `WebSocket`; no `innerHTML`/`eval` |
-| `src/offline/` | Background service worker (`background.ts`), offscreen coordinator (`document.ts`), verified pack downloader (`packs.ts`, `download-worker.ts`), IndexedDB storage (`store.ts`), Bergamot worker & warm model cache (`translator.ts`, `bergamot.ts`) | `offline`, `shared` | Strictly validates message `sender` |
-| `src/popup/` | Toolbar popup controller (`index.ts`) and pure view-model derivation (`view.ts`) | `popup`, `shared` | Thin UI layer over `PageState` and `PackStatus` |
+| `src/shared/` | Types, model catalog & routing, language/RTL helpers, text chunking & CSS unquoting, char-budgeted batching, badge derivation, shared UI formatting, thin RPC helper | `shared` | Pure modules (except `offline.ts`) may not touch `chrome.*` |
+| `src/page/` | Isolated content script: TreeWalker DOM scanning (`scanner.ts`), viewport lookahead & `<select>`/overflow visibility (`viewport.ts`), late shadow-root discovery (`shadow-discovery.ts`), patch & RTL `dir` ledger (`patches.ts`), microtask-batched IPC & LRU cache (`engine.ts`), session orchestration (`session.ts`), push state notifications (`index.ts`) | `page`, `shared` | No `fetch`, `XMLHttpRequest`, or `WebSocket`; no `innerHTML`/`eval` |
+| `src/offline/` | Background service worker (`background.ts`, action badge + shortcut command), offscreen coordinator (`document.ts`), verified pack downloader (`packs.ts`, `download-worker.ts`), IndexedDB storage (`store.ts`), adaptive 2-worker Bergamot pool (`translator.ts`, `bergamot.ts`) | `offline`, `shared` | Strictly validates message `sender` |
+| `src/popup/` | Toolbar popup controller (`index.ts`) with push updates, swap, and recent targets, plus pure view-model (`view.ts`) | `popup`, `shared` | Thin UI layer over `PageState` and `PackStatus` |
 | `src/packs/` | Language pack manager tab (`index.ts`) | `packs`, `shared` | Thin UI layer over `PackStatus` |
 
 ## Verification tiers
