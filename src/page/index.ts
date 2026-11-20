@@ -84,7 +84,8 @@ function install(): void {
   }
 
   chrome.runtime.onMessage.addListener((request: PageRequest, sender, reply) => {
-    if (sender.id !== chrome.runtime.id || sender.url !== chrome.runtime.getURL('popup.html')) return;
+    // Accept only extension-owned contexts (popup and background service worker), never content scripts.
+    if (sender.id !== chrome.runtime.id || sender.tab) return;
     if (request.type === 'start') {
       void start(request.source, request.target);
     } else if (request.type === 'restore') {

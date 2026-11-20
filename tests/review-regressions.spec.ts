@@ -230,3 +230,136 @@ test('does not accept a pack install against a pending removal', async () => {
     await browser.close();
   }
 });
+
+test('recovers automatically when offscreen document closes mid-session and user scrolls', async () => {
+  await withFakePacks(async ({ page, serve, openPopup }) => {
+    await page.goto(serve('/', `<!doctype html><html lang="fr"><body>
+      <h1>Haut de page</h1>
+      <div style="height:2400px"></div>
+      <p id="bottom">Bas de page</p>
+    </body></html>`));
+    const popup = await openPopup();
+    await prepare(popup);
+    await installFake(popup, { disconnectOnce: 'Bas de page' });
+    await popup.click();
+    await expect(page.locator('h1')).toHaveText('«Haut de page»');
+    await expect.poll(popup.status).toMatch(/^Translated to English/);
+
+    await page.locator('#bottom').evaluate(node => node.scrollIntoView());
+    await expect(page.locator('#bottom')).toHaveText('«Bas de page»');
+    const opens = await popup.evaluate<number>(`(async () => {
+      const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+      const [injection] = await chrome.scripting.executeScript({
+        target: { tabId: tab.id },
+        func: () => globalThis.engineOpens,
+      });
+      return injection.result;
+    })()`);
+    expect(opens).toBeGreaterThanOrEqual(2);
+  });
+});
+
+test('translates visible text overflowing zero-height and unclipped boxes while keeping scrollers clipped', async () => {
+  await withFakePacks(async ({ page, serve, openPopup }) => {
+    await page.goto(serve('/', `<!doctype html><html lang="fr"><body>
+      <div id="zero" style="height:0; overflow:visible">Texte sans hauteur</div>
+      <div style="height:40px"></div>
+      <div id="overflow" style="height:18px; overflow:visible">
+        <div style="height:24px"></div>Texte qui déborde
+      </div>
+      <div style="height:40px"></div>
+      <div id="scroller" style="height:40px; overflow:auto">
+        <p>Première ligne</p>
+        <div style="height:240px"></div>Texte caché dans le défilement
+      </div>
+    </body></html>`));
+    const popup = await openPopup();
+    await prepare(popup);
+    await installFake(popup);
+    await popup.click();
+    await expect(page.locator('#zero')).toHaveText('«Texte sans hauteur»');
+    await expect(page.locator('#overflow')).toContainText('«Texte qui déborde»');
+    await expect(page.locator('#scroller p')).toHaveText('«Première ligne»');
+    await expect(page.locator('#scroller')).not.toContainText('«Texte caché dans le défilement»');
+
+    await page.locator('#scroller').evaluate(node => { node.scrollTop = node.scrollHeight; });
+    await expect(page.locator('#scroller')).toContainText('«Texte caché dans le défilement»');
+  });
+});
+
+test('does not permanently skip a node whose eligibility flickers mid-flight', async () => {
+  await withFakePacks(async ({ page, serve, openPopup }) => {
+    await page.goto(serve('/', '<html lang="fr"><body><p id="flicker">Texte mouvant</p></body></html>'));
+    const popup = await openPopup();
+    await prepare(popup);
+    await installFake(popup, { delay: 300 });
+    await popup.click();
+    await expect.poll(() => translationCalls(popup)).toContain('Texte mouvant');
+
+    await page.locator('#flicker').evaluate(node => node.setAttribute('hidden', ''));
+    await page.waitForTimeout(450);
+    await expect(page.locator('#flicker')).toHaveText('Texte mouvant');
+
+    await page.locator('#flicker').evaluate(node => node.removeAttribute('hidden'));
+    await expect(page.locator('#flicker')).toHaveText('«Texte mouvant»');
+  });
+});
+
+test('downloads missing packs directly in popup, supports cancel, and auto-translates', async () => {
+  await withFakePacks(async ({ page, serve, openPopup }) => {
+    await page.goto(serve('/', '<html lang="de"><body><h1>Guten Morgen!</h1></body></html>'));
+    const popup = await openPopup();
+    await expect.poll(popup.status).toBe('Download language pack to translate this page.');
+    expect(await popup.evaluate('document.querySelector("#action").textContent')).toContain('Download & translate');
+
+    await installFake(popup);
+    // Mock pack download lifecycle in popup while letting real background auto-translate work.
+    await popup.evaluate(`(() => {
+      const send = chrome.runtime.sendMessage.bind(chrome.runtime);
+      let state = { installed: ['fr:en', 'es:en'] };
+      let timer;
+      chrome.runtime.sendMessage = async message => {
+        if (message.type === 'engine-open') return { ok: true };
+        if (message.type === 'packs-state') return { ok: true, value: structuredClone(state) };
+        if (message.type === 'packs-cancel') {
+          clearTimeout(timer);
+          state = { installed: ['fr:en', 'es:en'] };
+          return { ok: true, value: undefined };
+        }
+        if (message.type === 'packs-install') {
+          state = {
+            installed: ['fr:en', 'es:en'],
+            download: { pack: 'de:en', received: 5_000_000, total: 10_000_000, saving: false, step: 1, steps: 1 },
+          };
+          const auto = message.autoTranslate;
+          timer = setTimeout(async () => {
+            state = { installed: ['fr:en', 'es:en', 'de:en'] };
+            if (auto) {
+              await chrome.tabs.sendMessage(
+                auto.tabId,
+                { type: 'start', source: auto.source, target: auto.target },
+                { documentId: auto.documentId },
+              );
+            }
+          }, 450);
+          return { ok: true, value: undefined };
+        }
+        return send(message);
+      };
+    })()`);
+
+    // Start download, then cancel it before completion.
+    await popup.click();
+    await expect.poll(popup.status).toContain('Downloading German → English');
+    expect(await popup.evaluate('document.querySelector("#action").textContent')).toContain('Cancel download');
+    await popup.click();
+    await expect.poll(popup.status).toBe('Download language pack to translate this page.');
+    await expect(page.locator('h1')).toHaveText('Guten Morgen!');
+
+    // Download again and let it finish -> page translates automatically.
+    await popup.click();
+    await expect.poll(popup.status).toContain('Downloading German → English');
+    await expect(page.locator('h1')).toHaveText('«Guten Morgen!»');
+    await expect.poll(popup.status).toMatch(/^Translated to English/);
+  });
+});

@@ -1,8 +1,8 @@
 import type { TranslationCache } from './engine';
 import { OfflineError } from '../shared/offline';
 import {
-  canTranslate, eligible, fieldAllowed, fieldsOf, frameDocument, isElement, isText,
-  liveOnPage, policyAttributes, readField, textAttributes, writeField,
+  canTranslate, eligible, fieldAllowed, fieldsOf, frameDocument, isElement, isSkippedElement,
+  isText, liveOnPage, policyAttributes, readField, textAttributes, writeField,
 } from './surface';
 import type { Field, SurfaceRoot, Target } from './surface';
 import { Viewport } from './viewport';
@@ -11,7 +11,7 @@ import { ShadowDiscovery } from './shadow-discovery';
 const SLICE_MS = 6;
 const NODES_PER_SLICE = 400;
 const FIELDS_PER_BATCH = 24;
-const TRANSLATION_LANES = 4;
+const TRANSLATION_LANES = 12;
 
 interface Candidate {
   node: Target;
@@ -39,7 +39,7 @@ export class PageSession {
   private readonly viewport: Viewport;
   private readonly shadows: ShadowDiscovery;
   private readonly slots = new WeakMap<HTMLSlotElement, Node[]>();
-  private scanCursor?: { root: Node; iterator: NodeIterator };
+  private scanCursor?: { root: Node; walker: TreeWalker };
   private readonly knownFrames = new WeakSet<Element>();
   private readonly patches = new Map<Target, Map<Field, Patch>>();
   private readonly counts: Counts = { seen: 0, updated: 0, failed: 0 };
@@ -120,39 +120,57 @@ export class PageSession {
 
   private onChanges(records: MutationRecord[]): void {
     if (this.signal.aborted) return;
+    let changed = false;
+    let styleChanged = false;
     for (const record of records) {
       if (record.type === 'childList') {
-        for (const node of record.addedNodes) this.enqueue(node);
+        for (const node of record.addedNodes) {
+          this.enqueue(node);
+          changed = true;
+        }
         for (const node of record.removedNodes) {
-          if (isElement(node) || isText(node)) this.pendingRepair.add(node);
+          if (isElement(node) || isText(node)) {
+            this.pendingRepair.add(node);
+            changed = true;
+          }
         }
       } else if (record.type === 'characterData' && isText(record.target)) {
-        this.onFieldChange(record.target, 'text');
+        if (this.onFieldChange(record.target, 'text')) changed = true;
       } else if (record.type === 'attributes' && isElement(record.target)) {
         const name = record.attributeName;
-        if (name === 'style') continue;
+        if (name === 'style') {
+          styleChanged = true;
+          continue;
+        }
         if (name === 'class') {
           const previouslySkipped = /(?:^|[\t\n\f\r ])notranslate(?:$|[\t\n\f\r ])/u
             .test(record.oldValue ?? '');
-          if (previouslySkipped === record.target.classList.contains('notranslate')) continue;
+          if (previouslySkipped === record.target.classList.contains('notranslate')) {
+            styleChanged = true;
+            continue;
+          }
         }
         if (name === 'class' || name === 'hidden' ||
           name === 'translate' || name === 'contenteditable' || name === 'slot') {
           this.enqueue(record.target);
           this.pendingRepair.add(record.target);
+          changed = true;
         } else if (name) {
-          this.onFieldChange(record.target, name as Field);
+          if (this.onFieldChange(record.target, name as Field)) changed = true;
         }
       }
     }
-    this.viewport.refresh();
-    this.schedule();
+    if (styleChanged) this.viewport.refreshHidden();
+    if (changed) {
+      this.viewport.refresh();
+      this.schedule();
+    }
   }
 
-  private onFieldChange(node: Target, field: Field): void {
+  private onFieldChange(node: Target, field: Field): boolean {
     const fields = this.patches.get(node);
     const patch = fields?.get(field);
-    if (patch && readField(node, field) === patch.written) return;
+    if (patch && readField(node, field) === patch.written) return false;
     this.attempted.get(node)?.delete(field);
     this.clearBusy(node, field);
     this.seen.delete(node);
@@ -162,6 +180,7 @@ export class PageSession {
       if (!fields.size) this.patches.delete(node);
     }
     this.enqueue(node);
+    return true;
   }
 
   private enqueue(node: Node): void {
@@ -206,10 +225,7 @@ export class PageSession {
             return;
           }
           this.pending.delete(next.value);
-          if (liveOnPage(next.value, this.document)) {
-            const iterator = this.document.createNodeIterator(next.value, NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT);
-            this.scanCursor = { root: next.value, iterator };
-          }
+          this.beginScan(next.value);
         }
         this.discoverSlice(deadline);
       }
@@ -220,6 +236,19 @@ export class PageSession {
     }
   }
 
+  private beginScan(root: Node): void {
+    if (!liveOnPage(root, this.document)) return;
+    if (isElement(root) && isSkippedElement(root)) return;
+    this.visit(root);
+    if (isText(root)) return;
+    const walker = this.document.createTreeWalker(
+      root,
+      NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT,
+      node => (isElement(node) && isSkippedElement(node)) ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT,
+    );
+    this.scanCursor = { root, walker };
+  }
+
   private discoverSlice(deadline: number): void {
     const cursor = this.scanCursor;
     if (!cursor) return;
@@ -227,23 +256,32 @@ export class PageSession {
       this.scanCursor = undefined;
       return;
     }
+    // If the exact node at the previous yield boundary was removed, restart from its live root.
+    if (!liveOnPage(cursor.walker.currentNode, this.document)) {
+      cursor.walker.currentNode = cursor.root;
+    }
 
-    // NodeIterator adjusts if the current node is removed while discovery yields.
     for (let visited = 0; visited < NODES_PER_SLICE; visited++) {
-      const node = cursor.iterator.nextNode();
+      const node = cursor.walker.nextNode();
       if (!node) {
         this.scanCursor = undefined;
         return;
       }
-      if (isElement(node)) this.discoverRoots(node);
-      if ((isText(node) || isElement(node)) && !this.seen.has(node)) {
-        const fields = fieldsOf(node);
-        if (fields.length && eligible(node, this.document) &&
-          fields.some(field => this.original(node, field) !== undefined)) {
-          this.viewport.observe(node);
-        }
-      }
+      this.visit(node);
       if (performance.now() >= deadline) return;
+    }
+  }
+
+  private visit(node: Node): void {
+    if (isElement(node)) this.discoverRoots(node);
+    if ((isText(node) || isElement(node)) && !this.seen.has(node)) {
+      const fields = fieldsOf(node);
+      // Check text eligibility before walking ancestors to skip whitespace-only nodes in O(1).
+      if (fields.length &&
+        fields.some(field => this.original(node, field) !== undefined) &&
+        eligible(node, this.document)) {
+        this.viewport.observe(node);
+      }
     }
   }
 
@@ -306,9 +344,14 @@ export class PageSession {
           written = await this.cache.translate(original);
         } catch (error) {
           if (this.signal.aborted) continue;
+          if (!this.matches(candidate)) {
+            if (attempts.get(field) === original) attempts.delete(field);
+            this.counts.seen--;
+            continue;
+          }
           this.counts.failed++;
-          if (error instanceof OfflineError && error.code === 'busy' && this.matches(candidate)) {
-            attempts.delete(field);
+          if (error instanceof OfflineError && error.code === 'busy') {
+            if (attempts.get(field) === original) attempts.delete(field);
             let deferred = this.busy.get(node);
             if (!deferred) {
               deferred = new Set();
@@ -319,7 +362,13 @@ export class PageSession {
           }
           continue;
         }
-        if (this.signal.aborted || !this.matches(candidate)) continue;
+        if (this.signal.aborted) continue;
+        if (!this.matches(candidate)) {
+          // Node changed or temporarily became ineligible mid-flight; don't poison future scans.
+          if (attempts.get(field) === original) attempts.delete(field);
+          this.counts.seen--;
+          continue;
+        }
         if (original !== written) {
           let fields = this.patches.get(node);
           if (!fields) {
@@ -421,5 +470,7 @@ function isSlot(element: Element): element is HTMLSlotElement {
 
 function yieldToPage(): Promise<void> {
   // Task scheduling keeps input responsive even when all translations hit the cache.
-  return (globalThis as typeof globalThis & { scheduler: { yield(): Promise<void> } }).scheduler.yield();
+  const scheduler = (globalThis as typeof globalThis & { scheduler?: { yield(): Promise<void> } }).scheduler;
+  if (typeof scheduler?.yield === 'function') return scheduler.yield();
+  return new Promise(resolve => window.setTimeout(resolve, 0));
 }

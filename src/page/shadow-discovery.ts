@@ -19,7 +19,7 @@ export class ShadowDiscovery {
       for (const { target, isIntersecting, boundingClientRect } of entries) {
         if (!this.watched.has(target)) continue;
         // Boxless hosts can render their shadow children without intersecting themselves.
-        const boxless = !boundingClientRect.width && !boundingClientRect.height &&
+        const boxless = !isIntersecting && !boundingClientRect.width && !boundingClientRect.height &&
           target.ownerDocument.defaultView?.getComputedStyle(target).display === 'contents';
         if (isIntersecting || boxless) this.visible.add(target);
         else this.visible.delete(target);

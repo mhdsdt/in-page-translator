@@ -6,11 +6,9 @@ export type Field = 'text' | Attribute;
 export type SurfaceRoot = Document | ShadowRoot;
 export type Target = Text | Element;
 
-const skipSelector = [
+const SKIP_TAGS = new Set([
   'head', 'script', 'style', 'noscript', 'template', 'code', 'pre', 'kbd', 'samp',
-  '[hidden]', '.notranslate',
-  '[contenteditable=""]', '[contenteditable="true" i]', '[contenteditable="plaintext-only" i]',
-].join(',');
+]);
 
 export function isElement(node: Node): node is Element {
   return node.nodeType === Node.ELEMENT_NODE;
@@ -20,9 +18,24 @@ export function isText(node: Node): node is Text {
   return node.nodeType === Node.TEXT_NODE;
 }
 
+export function isSkippedElement(element: Element): boolean {
+  if (SKIP_TAGS.has(element.localName)) return true;
+  if (element.hasAttribute('hidden') || element.classList.contains('notranslate')) return true;
+  const editable = element.getAttribute('contenteditable');
+  if (editable !== null) {
+    const mode = editable.toLowerCase();
+    if (mode === '' || mode === 'true' || mode === 'plaintext-only') return true;
+  }
+  return false;
+}
+
 export function frameDocument(frame: Element): Document | null {
   if (frame.localName !== 'iframe' && frame.localName !== 'frame') return null;
-  return (frame as HTMLIFrameElement).contentDocument;
+  try {
+    return (frame as HTMLIFrameElement).contentDocument;
+  } catch {
+    return null;
+  }
 }
 
 export function liveOnPage(node: Node, page: Document): boolean {
@@ -41,7 +54,7 @@ export function eligible(node: Node, page: Document): boolean {
   let translation: boolean | undefined;
   for (let current: Node | null = node; current; current = composedParent(current)) {
     if (!isElement(current)) continue;
-    if (current.matches(skipSelector)) return false;
+    if (isSkippedElement(current)) return false;
     if (translation === undefined) {
       const mode = current.getAttribute('translate')?.toLowerCase();
       if (mode === 'no') translation = false;
@@ -85,6 +98,7 @@ export function fieldAllowed(node: Target, field: Field): boolean {
 const NO_FIELDS = [] as const;
 const TEXT_FIELD = ['text'] as const;
 const WORD_CHARACTER = /\p{L}/u;
+const NON_TRANSLATABLE = /^(?:https?:\/\/|mailto:|www\.)\S+$|^[^\s@]+@[^\s@]+\.[^\s@]+$/iu;
 
 export function readField(node: Target, field: Field): string | null {
   return isText(node) ? node.data : node.getAttribute(field);
@@ -97,5 +111,5 @@ export function writeField(node: Target, field: Field, value: string): void {
 
 export function canTranslate(value: string): boolean {
   if (!WORD_CHARACTER.test(value)) return false;
-  return !/^(?:https?:\/\/|mailto:|www\.)\S+$|^[^\s@]+@[^\s@]+\.[^\s@]+$/iu.test(value.trim());
+  return !NON_TRANSLATABLE.test(value.trim());
 }

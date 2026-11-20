@@ -1,7 +1,8 @@
 import { formatSize, inputs, outputs, packBytes, routeFor } from '../shared/catalog';
 import type { Pack } from '../shared/catalog';
-import { catalogLanguage, fillLanguages, languageName, normalizeLanguage } from '../shared/languages';
-import { engineRequest, requestEngine } from '../shared/offline';
+import { catalogLanguage, fillLanguages, languageName, normalizeLanguage, pairName } from '../shared/languages';
+import { engineRequest, OfflineError, requestEngine } from '../shared/offline';
+import type { DownloadStatus, PackStatus } from '../shared/offline';
 import { packSelectionKey } from '../shared/protocol';
 import type { PackSelection, PageError, PageRequest, PageState } from '../shared/protocol';
 
@@ -13,16 +14,17 @@ const actionLabel = action.querySelector<HTMLSpanElement>('.action-label')!;
 const actionIcon = action.querySelector<SVGUseElement>('use')!;
 const status = document.querySelector<HTMLParagraphElement>('#status')!;
 const panel = document.querySelector<HTMLDivElement>('#status-panel')!;
+const meterFill = document.querySelector<HTMLSpanElement>('#meter-fill')!;
 const readiness = document.querySelector<HTMLParagraphElement>('#readiness')!;
 const site = document.querySelector<HTMLParagraphElement>('#site')!;
 const languagePacks = document.querySelector<HTMLButtonElement>('#language-packs')!;
 
 type Tone = 'idle' | 'busy' | 'success' | 'warn' | 'error' | 'off';
-type ActionKind = 'translate' | 'packs' | 'retry' | 'cancel' | 'restore';
+type ActionKind = 'translate' | 'download' | 'retry' | 'cancel' | 'restore';
 
 const actionIcons: Record<ActionKind, string> = {
   translate: '#i-arrow-right',
-  packs: '#i-download',
+  download: '#i-download',
   retry: '#i-retry',
   cancel: '#i-stop',
   restore: '#i-undo',
@@ -32,7 +34,7 @@ const errors: Record<PageError, string> = {
   'language-unknown': 'Choose the page’s original language in From.',
   'same-language': 'Choose a different language in To.',
   'unsupported-pair': 'No language packs are available for this pair.',
-  'missing-packs': 'Install the language packs for this pair first.',
+  'missing-packs': 'Download language pack to translate this page.',
   'engine-unavailable': 'The local translator couldn’t start. Try again.',
   'translation-failed': 'Couldn’t translate the visible text. Show original and try again.',
   'no-text': 'No text in view yet. Scroll to translate more.',
@@ -46,10 +48,14 @@ let detected: string | undefined;
 let detection: 'idle' | 'pending' | 'done' = 'idle';
 let sourceSelection = 'auto';
 let timer: number | undefined;
+let packTimer: number | undefined;
 let sending = false;
 let warmedPair: string | undefined;
+let packStatus: PackStatus | undefined;
 let installed: Set<string> | undefined;
 let packRefresh: Promise<void> | undefined;
+let wasDownloading = false;
+let downloadError: string | undefined;
 let resumedSelection = false;
 let openingPacks = false;
 
@@ -65,6 +71,7 @@ form.addEventListener('submit', (event) => {
 for (const select of [source, target]) {
   select.addEventListener('change', () => {
     if (select === source) sourceSelection = source.value;
+    downloadError = undefined;
     if (state?.phase === 'error') state = { ...state, phase: 'original', error: undefined };
     render();
   });
@@ -72,14 +79,14 @@ for (const select of [source, target]) {
 
 languagePacks.addEventListener('click', () => { void openPacks(); });
 
-async function openPacks(forDownload = false): Promise<void> {
+async function openPacks(): Promise<void> {
   if (openingPacks) return;
   openingPacks = true;
   const url = new URL(chrome.runtime.getURL('packs.html'));
   const from = selectedSource();
   if (from) url.searchParams.set('from', from);
   if (target.value) url.searchParams.set('to', target.value);
-  if (address && forDownload) {
+  if (address) {
     url.searchParams.set('tab', String(address.tabId));
     const packSelection: PackSelection = { documentId: address.documentId, source: sourceSelection, target: target.value };
     await chrome.storage.session.set({ [packSelectionKey(address.tabId)]: packSelection }).catch(() => {});
@@ -150,14 +157,41 @@ async function connect(): Promise<void> {
 }
 
 function refreshPacks(): Promise<void> {
+  window.clearTimeout(packTimer);
+  packTimer = undefined;
   packRefresh ??= engineRequest({ type: 'packs-state' })
-    .then(packs => { installed = new Set(packs.installed); })
-    .catch(() => { installed = undefined; })
+    .then(packs => {
+      const finishedDownload = wasDownloading && !packs.download;
+      packStatus = packs;
+      installed = new Set(packs.installed);
+      wasDownloading = Boolean(packs.download);
+      if (packs.download) {
+        downloadError = undefined;
+        packTimer = window.setTimeout(() => { void refreshPacks(); }, 250);
+      } else if (finishedDownload) {
+        if (packs.failure) {
+          downloadError = formatDownloadFailure(packs.failure);
+        } else if (address && state) {
+          void poll();
+        }
+      }
+    })
+    .catch(() => {
+      packStatus = undefined;
+      installed = undefined;
+    })
     .finally(() => {
       packRefresh = undefined;
       render();
     });
   return packRefresh;
+}
+
+function formatDownloadFailure(failure: NonNullable<PackStatus['failure']>): string {
+  const pair = pairName(failure.pack);
+  if (failure.error === 'storage-failed') return 'Couldn’t save ' + pair + '. Check available storage and try again.';
+  if (failure.error === 'integrity-failed') return 'The ' + pair + ' download did not pass verification. Try again.';
+  return 'Couldn’t download ' + pair + '. Check the connection and try again.';
 }
 
 function needsPacks(from: string, to: string): boolean {
@@ -195,16 +229,59 @@ function send(request: PageRequest): Promise<PageState> {
 }
 
 async function submit(): Promise<void> {
-  if (!state || action.disabled || openingPacks) return;
+  if (!state || !address || action.disabled || openingPacks) return;
+
+  if (packStatus?.download) {
+    sending = true;
+    render();
+    try {
+      await requestEngine({ type: 'packs-cancel' });
+    } catch {}
+    sending = false;
+    await refreshPacks();
+    return;
+  }
+
   const desiredTarget = target.value;
   if (!desiredTarget) return;
   const starting = canStart(state);
   const from = selectedSource();
+
   if (starting && from && needsPacks(from, desiredTarget)) {
+    downloadError = undefined;
+    sending = true;
+    render();
     void chrome.storage.local.set({ targetLanguage: desiredTarget }).catch(() => {});
-    await openPacks(true);
+    if (resumedSelection) {
+      void chrome.storage.session.remove(packSelectionKey(address.tabId)).catch(() => {});
+      resumedSelection = false;
+    }
+    try {
+      wasDownloading = true;
+      await engineRequest({
+        type: 'packs-install',
+        from,
+        to: desiredTarget,
+        autoTranslate: {
+          tabId: address.tabId,
+          documentId: address.documentId,
+          source: from,
+          target: desiredTarget,
+        },
+      });
+    } catch (error) {
+      wasDownloading = false;
+      downloadError = error instanceof OfflineError && error.code === 'busy'
+        ? 'Wait for the current download or cancel it first.'
+        : 'Couldn’t start the download. Try again.';
+    } finally {
+      sending = false;
+      await refreshPacks();
+    }
     return;
   }
+
+  downloadError = undefined;
   sending = true;
   cancelPoll();
   render();
@@ -214,7 +291,7 @@ async function submit(): Promise<void> {
       : { type: 'restore' }));
     if (starting) {
       void chrome.storage.local.set({ targetLanguage: desiredTarget }).catch(() => {});
-      if (resumedSelection && address) void chrome.storage.session.remove(packSelectionKey(address.tabId)).catch(() => {});
+      if (resumedSelection) void chrome.storage.session.remove(packSelectionKey(address.tabId)).catch(() => {});
       resumedSelection = false;
     }
     schedulePoll();
@@ -258,8 +335,11 @@ function unavailable(message: string, tone: Tone): void {
   address = undefined;
   state = undefined;
   cancelPoll();
+  window.clearTimeout(packTimer);
+  packTimer = undefined;
   source.disabled = target.disabled = action.disabled = true;
   readiness.hidden = true;
+  panel.dataset.progress = 'false';
   updateStatus(message, tone);
 }
 
@@ -267,6 +347,7 @@ function render(): void {
   if (!state) return;
   const page = state;
   const starting = canStart(page);
+  const activeDownload = packStatus?.download;
   const retry = page.error === 'engine-unavailable';
   if (retry && page.source && inputs.includes(page.source)) sourceSelection = page.source;
   detectSource(page);
@@ -283,16 +364,25 @@ function render(): void {
   const invalid = starting && from && !route.length;
   const unknown = starting && !from;
   const checking = starting && route.length > 0 && !installed && packRefresh !== undefined;
-  if (starting && installed && from && route.length && !missing && warmedPair !== from + ':' + to) {
+  if (starting && !activeDownload && installed && from && route.length && !missing && warmedPair !== from + ':' + to) {
     warmedPair = from + ':' + to;
     void requestEngine({ type: 'engine-prepare', from, to }).catch(() => {});
   }
 
-  source.disabled = target.disabled = sending || !starting;
+  source.disabled = target.disabled = sending || !starting || Boolean(activeDownload);
   const detecting = starting && sourceSelection === 'auto' && !page.declared && detection === 'pending';
+
+  if (activeDownload) {
+    action.disabled = sending || activeDownload.saving;
+    setAction('cancel', 'Cancel download');
+    renderDownload(activeDownload);
+    return;
+  }
+
+  panel.dataset.progress = 'false';
   action.disabled = sending || page.phase === 'restoring' || detecting || checking || Boolean(invalid) || unknown;
   const pending = page.phase === 'preparing' || page.phase === 'translating';
-  if (missing) setAction('packs', 'Get language packs');
+  if (missing) setAction('download', 'Download & translate');
   else if (retry) setAction('retry', 'Retry translation');
   else if (starting) setAction('translate', 'Translate page');
   else if (pending) setAction('cancel', 'Cancel and restore');
@@ -301,14 +391,16 @@ function render(): void {
   const message = detecting ? 'Detecting page language…'
     : invalid ? errors[from === to ? 'same-language' : 'unsupported-pair']
     : checking ? 'Checking installed language packs…'
+    : downloadError ? downloadError
     : missing ? errors['missing-packs']
     : unknown ? errors['language-unknown']
     : page.error === 'missing-packs' && installed ? 'Page is in its original language.'
     : statusMessage(page);
 
   const busy = sending || detecting || checking || pending || page.phase === 'restoring';
-  const failed = page.phase === 'error' && (missing || page.error !== 'missing-packs');
+  const failed = Boolean(downloadError) || (page.phase === 'error' && (missing || page.error !== 'missing-packs'));
   const tone: Tone = busy ? 'busy'
+    : downloadError ? 'error'
     : invalid || missing || unknown || page.error === 'no-text' || page.failed > 0 ? 'warn'
     : failed ? 'error'
     : page.phase === 'translated' ? 'success'
@@ -316,6 +408,23 @@ function render(): void {
   updateStatus(message, tone);
   renderReadiness(starting && !detecting && route.length ? route : []);
   schedulePoll();
+}
+
+function renderDownload(active: DownloadStatus): void {
+  const stepLabel = active.steps > 1 ? ' (' + active.step + ' of ' + active.steps + ')' : '';
+  const verb = active.saving ? 'Saving ' : 'Downloading ';
+  const ratio = active.saving ? 1 : active.total ? Math.min(1, active.received / active.total) : 0;
+
+  updateStatus(verb + pairName(active.pack) + stepLabel + '…', 'busy');
+  panel.dataset.progress = active.saving ? 'false' : 'true';
+  meterFill.style.transform = 'scaleX(' + ratio + ')';
+
+  readiness.hidden = false;
+  readiness.dataset.tone = 'progress';
+  const detail = active.saving
+    ? 'Verifying and saving to device…'
+    : formatSize(active.received) + ' of ' + formatSize(active.total) + ' · ' + Math.floor(ratio * 100) + '%';
+  if (readiness.textContent !== detail) readiness.textContent = detail;
 }
 
 function renderReadiness(route: Pack[]): void {

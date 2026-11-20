@@ -33,34 +33,60 @@ interface FakeOptions {
   delay?: number;
   firstSetup?: 'engine-unavailable' | 'missing-packs';
   busy?: Record<string, number>;
+  disconnectOnce?: string;
 }
 
-export async function installFake(popup: Popup, { delay = 0, firstSetup, busy = {} }: FakeOptions = {}): Promise<void> {
+export async function installFake(
+  popup: Popup,
+  { delay = 0, firstSetup, busy = {}, disconnectOnce }: FakeOptions = {},
+): Promise<void> {
   await popup.evaluate(`(async () => {
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
     await chrome.scripting.executeScript({
       target: { tabId: tab.id },
-      args: [${delay}, ${JSON.stringify(firstSetup ?? null)}, ${JSON.stringify(busy)}],
-      func: (delay, firstSetup, busy) => {
+      args: [${delay}, ${JSON.stringify(firstSetup ?? null)}, ${JSON.stringify(busy)}, ${JSON.stringify(disconnectOnce ?? null)}],
+      func: (delay, firstSetup, busy, disconnectOnce) => {
         globalThis.translationCalls = [];
+        globalThis.engineOpens = 0;
         let attempts = 0;
+        let disconnected = false;
         const send = chrome.runtime.sendMessage.bind(chrome.runtime);
+        const translateOne = (text) => {
+          globalThis.translationCalls.push(text);
+          if (busy[text] > 0) {
+            busy[text]--;
+            return { ok: false, error: 'busy' };
+          }
+          return text === 'FAIL'
+            ? { ok: false, error: 'engine-unavailable' }
+            : { ok: true, value: '«' + text + '»' };
+        };
         chrome.runtime.sendMessage = async message => {
-          if (message.type === 'engine-open') return { ok: true };
+          if (message.type === 'engine-open') {
+            globalThis.engineOpens++;
+            return { ok: true };
+          }
           if (message.type === 'engine-prepare') {
             attempts++;
             return attempts === 1 && firstSetup ? { ok: false, error: firstSetup } : { ok: true };
           }
-          if (message.type !== 'engine-translate') return send(message);
-          globalThis.translationCalls.push(message.text);
-          if (delay) await new Promise(resolve => setTimeout(resolve, delay));
-          if (busy[message.text] > 0) {
-            busy[message.text]--;
-            return { ok: false, error: 'busy' };
+          if (message.type === 'engine-translate') {
+            if (disconnectOnce && !disconnected && message.text === disconnectOnce) {
+              disconnected = true;
+              return undefined;
+            }
+            if (delay) await new Promise(resolve => setTimeout(resolve, delay));
+            return translateOne(message.text);
           }
-          return message.text === 'FAIL'
-            ? { ok: false, error: 'engine-unavailable' }
-            : { ok: true, value: '«' + message.text + '»' };
+          if (message.type === 'engine-translate-batch') {
+            if (disconnectOnce && !disconnected && message.texts.includes(disconnectOnce)) {
+              disconnected = true;
+              return undefined;
+            }
+            if (delay) await new Promise(resolve => setTimeout(resolve, delay));
+            return { ok: true, value: message.texts.map(translateOne) };
+          }
+          return send(message);
         };
       },
     });

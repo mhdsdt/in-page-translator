@@ -1,13 +1,20 @@
 import { catalog, packBytes, routeFor } from '../shared/catalog';
 import type { Pack } from '../shared/catalog';
 import { OfflineError } from '../shared/offline';
-import type { DownloadStatus, ModelBuffers, PackStatus, Pair } from '../shared/offline';
+import type { AutoTranslateTarget, DownloadStatus, ModelBuffers, PackStatus, Pair } from '../shared/offline';
 import type { DownloadReply, DownloadRequest } from './download-protocol';
 import { installedPacks, removePack, writePack } from './store';
 
 interface Download {
   state: DownloadStatus;
   controller: AbortController;
+  autoTranslate?: AutoTranslateTarget;
+}
+
+export interface PackHooks {
+  onPackSaved?: (pack: Pack, buffers: ModelBuffers, hasAutoTranslate: boolean) => void;
+  onAutoTranslate?: (target: AutoTranslateTarget) => Promise<void>;
+  onPackRemoved?: (id: string) => void;
 }
 
 export class Packs {
@@ -16,10 +23,12 @@ export class Packs {
   private removing = false;
   private failure?: PackStatus['failure'];
 
+  constructor(private readonly hooks: PackHooks = {}) {}
+
   async status(): Promise<PackStatus> {
     return {
       installed: [...await this.getInstalled()],
-      download: this.active?.state,
+      download: this.active ? { ...this.active.state } : undefined,
       failure: this.failure,
     };
   }
@@ -31,7 +40,7 @@ export class Packs {
     return route;
   }
 
-  async install(pair: Pair): Promise<void> {
+  async install(pair: Pair, autoTranslate?: AutoTranslateTarget): Promise<void> {
     if (this.active || this.removing) throw new OfflineError('busy');
     const route = requireRoute(pair);
     const installed = await this.getInstalled();
@@ -39,15 +48,25 @@ export class Packs {
     const missing = route.filter(pack => !installed.has(pack.id));
     const first = missing[0];
     this.failure = undefined;
-    if (!first) return;
+    if (!first) {
+      if (autoTranslate) void this.hooks.onAutoTranslate?.(autoTranslate).catch(() => {});
+      return;
+    }
 
-    const job: Download = { state: progressFor(first), controller: new AbortController() };
+    const job: Download = {
+      state: progressFor(first, 1, missing.length),
+      controller: new AbortController(),
+      autoTranslate,
+    };
     this.active = job;
     void this.installPacks(missing, installed, job);
   }
 
   cancel(): void {
-    if (this.active && !this.active.state.saving) this.active.controller.abort();
+    if (this.active && !this.active.state.saving) {
+      this.active.autoTranslate = undefined;
+      this.active.controller.abort();
+    }
   }
 
   async remove(id: string): Promise<void> {
@@ -59,6 +78,7 @@ export class Packs {
       const installed = await this.getInstalled();
       await removePack(pack);
       installed.delete(id);
+      this.hooks.onPackRemoved?.(id);
     } catch {
       throw new OfflineError('storage-failed');
     } finally {
@@ -76,13 +96,18 @@ export class Packs {
 
   private async installPacks(route: Pack[], installed: Set<string>, job: Download): Promise<void> {
     try {
-      for (const pack of route) {
-        job.state = progressFor(pack);
+      for (let index = 0; index < route.length; index++) {
+        const pack = route[index]!;
+        job.state = progressFor(pack, index + 1, route.length);
         const buffers = await download(pack, job);
         job.controller.signal.throwIfAborted();
         job.state.saving = true;
         await writePack(pack, buffers);
         installed.add(pack.id);
+        this.hooks.onPackSaved?.(pack, buffers, Boolean(job.autoTranslate));
+      }
+      if (job.autoTranslate && !job.controller.signal.aborted) {
+        await this.hooks.onAutoTranslate?.(job.autoTranslate).catch(() => {});
       }
     } catch (error) {
       if (!job.controller.signal.aborted) {
@@ -104,8 +129,8 @@ function requireRoute(pair: Pair): Pack[] {
   return route;
 }
 
-function progressFor(pack: Pack): DownloadStatus {
-  return { pack: pack.id, received: 0, total: packBytes(pack, 'size'), saving: false };
+function progressFor(pack: Pack, step: number, steps: number): DownloadStatus {
+  return { pack: pack.id, received: 0, total: packBytes(pack, 'size'), saving: false, step, steps };
 }
 
 async function download(pack: Pack, job: Download): Promise<ModelBuffers> {

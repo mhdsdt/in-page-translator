@@ -16,8 +16,8 @@ To update, download the latest ZIP, replace the contents of the installed folder
 ## Translate a page
 
 1. Open **In-Page Translator** and choose **From** and **To**. The extension can detect the source language.
-2. If prompted, click **Get language packs**, then **Download packs**. When the download finishes, click **Back to page** and reopen the extension.
-3. Click **Translate page**. Select **Show original** to restore the page.
+2. If the language pair is not yet installed, click **Download & translate** to download the pack directly in the popup and automatically translate the page once it finishes.
+3. Otherwise click **Translate page**. Select **Show original** to restore the page.
 
 The first download for a language pair needs an internet connection. Installed pairs work offline. Open **Packs** to see available languages, check download and disk sizes, and remove packs. When a direct model is unavailable, the extension can use two available packs to translate through English.
 

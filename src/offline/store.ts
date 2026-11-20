@@ -9,8 +9,20 @@ function open(): Promise<IDBDatabase> {
   database ??= new Promise<IDBDatabase>((resolve, reject) => {
     const request = indexedDB.open('translation-models', 1);
     request.onupgradeneeded = () => { request.result.createObjectStore(STORE); };
-    request.onsuccess = () => resolve(request.result);
+    request.onsuccess = () => {
+      const db = request.result;
+      const reset = () => {
+        database = undefined;
+      };
+      db.onclose = reset;
+      db.onversionchange = () => {
+        db.close();
+        reset();
+      };
+      resolve(db);
+    };
     request.onerror = () => reject(request.error);
+    request.onblocked = () => reject(new Error('Pack database is blocked'));
   }).catch(error => {
     database = undefined;
     throw error;
@@ -27,7 +39,8 @@ async function transact<T>(
     const transaction = db.transaction(STORE, mode);
     const request = run(transaction.objectStore(STORE));
     transaction.oncomplete = () => resolve(request.result);
-    transaction.onabort = () => reject(transaction.error);
+    transaction.onabort = () => reject(transaction.error ?? new Error('Pack storage transaction aborted'));
+    transaction.onerror = () => reject(transaction.error ?? request.error ?? new Error('Pack storage error'));
   });
 }
 

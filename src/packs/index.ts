@@ -137,8 +137,9 @@ function render(): void {
   if (active) {
     cancel.disabled = pending || active.saving;
     progress.value = active.saving ? 1 : active.total ? active.received / active.total : 0;
+    const stepLabel = active.steps > 1 ? ' (' + active.step + ' of ' + active.steps + ')' : '';
     setText(transferLabel, (active.saving ? 'Saving ' : 'Downloading ') + pairName(active.pack) +
-      (active.saving ? '…' : ''));
+      stepLabel + (active.saving ? '…' : ''));
     setText(transferBytes, active.saving ? ''
       : formatSize(active.received) + ' of ' + formatSize(active.total) + ' · ' + Math.floor(progress.value * 100) + '%');
   }
