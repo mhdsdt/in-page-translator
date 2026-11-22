@@ -1,4 +1,5 @@
-import { takePrefixBatch } from '../shared/batch';
+import { takeBucketedBatch, takePrefixBatch } from '../shared/batch';
+import { LruCache } from '../shared/cache';
 import { inputs, outputs, routeFor } from '../shared/catalog';
 import { catalogLanguage } from '../shared/languages';
 import { MAX_TRANSLATION_CHARS, OfflineError } from '../shared/offline';
@@ -15,11 +16,14 @@ interface Job {
   reply: (result: EngineReply<string>) => void;
 }
 
-const MAX_QUEUED = 128;
-const MAX_WORKERS = (globalThis.navigator?.hardwareConcurrency ?? 1) >= 4 ? 2 : 1;
-const BATCH_LIMITS = { maxItems: 32, maxChars: 2_400 };
+const MAX_QUEUED = 256;
+const MAX_BATCH_REQUEST_ITEMS = 32;
 const COALESCE_MS = 4;
+const COALESCE_IMMEDIATE_ITEMS = 16;
+const CACHE_CAPACITY = 4_096;
+const MAX_CACHE_CHARS = 400;
 
+const translationCache = new LruCache<string, string>(CACHE_CAPACITY);
 const translator = new Translator();
 const packs = new Packs({
   onPackSaved(pack, buffers, hasAutoTranslate) {
@@ -31,6 +35,7 @@ const packs = new Packs({
     await chrome.runtime.sendMessage({ type: 'auto-translate-ready', target });
   },
   onPackRemoved(id) {
+    translationCache.clear();
     translator.evictPack(id);
   },
   onStatusChange(status, autoTabId) {
@@ -47,11 +52,27 @@ const packs = new Packs({
 
 const queue: Job[] = [];
 let inFlight = 0;
+let burstBatches = 0;
 let coalesceTimer: number | undefined;
 
+function cacheKey(pair: Pair, html: boolean, text: string): string {
+  return pair.from + '\0' + pair.to + '\0' + (html ? 'h' : 'p') + '\0' + text;
+}
+
+function storeTranslation(pair: Pair, html: boolean, text: string, value: string): void {
+  if (text.length <= MAX_CACHE_CHARS) {
+    translationCache.set(cacheKey(pair, html, text), value);
+  }
+}
+
+function lookupTranslation(pair: Pair, html: boolean, text: string): string | undefined {
+  if (text.length > MAX_CACHE_CHARS) return undefined;
+  return translationCache.get(cacheKey(pair, html, text));
+}
+
 function scheduleDrain(): void {
-  if (inFlight >= MAX_WORKERS || !queue.length) return;
-  if (inFlight === 0 && !batchReady()) {
+  if (!queue.length) return;
+  if (inFlight === 0 && queue.length < COALESCE_IMMEDIATE_ITEMS) {
     if (coalesceTimer !== undefined) return;
     coalesceTimer = window.setTimeout(() => {
       coalesceTimer = undefined;
@@ -64,49 +85,60 @@ function scheduleDrain(): void {
   pump();
 }
 
-function batchReady(): boolean {
-  if (queue.length >= BATCH_LIMITS.maxItems) return true;
-  let chars = 0;
-  for (const job of queue) {
-    chars += job.text.length;
-    if (chars >= BATCH_LIMITS.maxChars) return true;
-  }
-  return false;
-}
-
 function pump(): void {
-  while (queue.length && inFlight < MAX_WORKERS) {
+  while (queue.length) {
     const { pair } = queue[0]!;
+    const samePair = (job: Job) => job.pair.from === pair.from && job.pair.to === pair.to;
     const route = routeFor(pair.from, pair.to);
-    const limit = translator.maxConcurrency(route);
-    if (inFlight >= limit) break;
-
-    let samePair = 0;
-    let samePairChars = 0;
-    for (const job of queue) {
-      if (job.pair.from !== pair.from || job.pair.to !== pair.to) break;
-      samePair++;
-      samePairChars += job.text.length;
+    if (!route.length) {
+      const invalid = takePrefixBatch(queue, samePair, job => job.text.length, { maxItems: 32, maxChars: 10_000 });
+      queue.splice(0, invalid.length);
+      for (const job of invalid) job.reply({ ok: false, error: 'unsupported-pair' });
+      continue;
     }
 
-    const limits = limit > 1 && inFlight === 0 && samePair >= 6
-      ? {
-          maxItems: Math.min(16, Math.ceil(samePair / 2)),
-          maxChars: Math.min(1_200, Math.max(400, Math.ceil(samePairChars / 2))),
-        }
-      : BATCH_LIMITS;
+    let queuedItems = 0;
+    let queuedChars = 0;
+    const scanCap = Math.min(queue.length, 64);
+    for (let index = 0; index < scanCap; index++) {
+      const job = queue[index]!;
+      if (!samePair(job)) break;
+      queuedItems++;
+      queuedChars += job.text.length;
+    }
 
-    const batch = takeBatch(pair, limits);
+    const slotIndex = translator.acquireReadySlot(route);
+    if (slotIndex === undefined) {
+      if (queuedItems >= 6 || queuedChars >= 240) {
+        const desired = Math.min(translator.maxConcurrency(route), 1 + Math.ceil(queuedItems / 8));
+        void packs.route(pair).then(verified => translator.warmExtra(verified, desired, scheduleDrain), () => {});
+      }
+      break;
+    }
+
+    const preferLong = burstBatches > 0 && translator.maxConcurrency(route) > 1;
+    const batch = takeBucketedBatch(queue, samePair, job => job.text.length, {
+      preferShort: burstBatches === 0,
+      preferLong,
+    });
     if (!batch.length) break;
+
+    burstBatches++;
     inFlight++;
-    void processBatch(pair, batch).finally(() => {
+    void processBatch(slotIndex, pair, batch).finally(() => {
       inFlight--;
+      if (!queue.length && inFlight === 0) burstBatches = 0;
       if (queue.length) scheduleDrain();
     });
+
+    if (queue.length >= 6) {
+      const desired = Math.min(translator.maxConcurrency(route), 1 + Math.ceil(queue.length / 8));
+      void packs.route(pair).then(verified => translator.warmExtra(verified, desired, scheduleDrain), () => {});
+    }
   }
 }
 
-async function processBatch(pair: Pair, batch: Job[]): Promise<void> {
+async function processBatch(slotIndex: number, pair: Pair, batch: Job[]): Promise<void> {
   let route;
   try {
     route = await packs.route(pair);
@@ -117,10 +149,19 @@ async function processBatch(pair: Pair, batch: Job[]): Promise<void> {
   }
 
   try {
-    const translations = await translator.translate(route, batch.map(({ text, html }) => ({ text, html })));
+    const translations = await translator.translateOn(
+      slotIndex,
+      route,
+      batch.map(({ text, html }) => ({ text, html })),
+    );
     batch.forEach((job, index) => {
       const value = translations[index];
-      job.reply(value === undefined ? { ok: false, error: 'engine-unavailable' } : { ok: true, value });
+      if (value === undefined) {
+        job.reply({ ok: false, error: 'engine-unavailable' });
+      } else {
+        storeTranslation(pair, job.html, job.text, value);
+        job.reply({ ok: true, value });
+      }
     });
   } catch (error) {
     if (batch.length === 1 || (error instanceof OfflineError &&
@@ -133,23 +174,17 @@ async function processBatch(pair: Pair, batch: Job[]): Promise<void> {
     for (const job of batch) {
       try {
         const [value] = await translator.translate(route, [{ text: job.text, html: job.html }]);
-        job.reply(value === undefined ? { ok: false, error: 'engine-unavailable' } : { ok: true, value });
+        if (value === undefined) {
+          job.reply({ ok: false, error: 'engine-unavailable' });
+        } else {
+          storeTranslation(pair, job.html, job.text, value);
+          job.reply({ ok: true, value });
+        }
       } catch (itemError) {
         job.reply(failure(itemError));
       }
     }
   }
-}
-
-function takeBatch(pair: Pair, limits: { maxItems: number; maxChars: number }): Job[] {
-  const batch = takePrefixBatch(
-    queue,
-    job => job.pair.from === pair.from && job.pair.to === pair.to,
-    job => job.text.length,
-    limits,
-  );
-  queue.splice(0, batch.length);
-  return batch;
 }
 
 function failure(error: unknown): EngineReply<never> {
@@ -165,17 +200,27 @@ chrome.runtime.onMessage.addListener((request: EngineRequest, sender, reply: (re
   const content = Boolean(sender.tab) && !popup && !manager;
 
   if (request.type === 'engine-translate' && content) {
-    if (typeof request.text !== 'string' || request.text.length > MAX_TRANSLATION_CHARS || queue.length >= MAX_QUEUED) {
+    const html = Boolean(request.html);
+    if (typeof request.text !== 'string' || request.text.length > MAX_TRANSLATION_CHARS) {
       reply({ ok: false, error: 'busy' });
       return;
     }
-    queue.push({ pair: request, text: request.text, html: Boolean(request.html), reply });
+    const cached = lookupTranslation(request, html, request.text);
+    if (cached !== undefined) {
+      reply({ ok: true, value: cached });
+      return;
+    }
+    if (queue.length >= MAX_QUEUED) {
+      reply({ ok: false, error: 'busy' });
+      return;
+    }
+    queue.push({ pair: request, text: request.text, html, reply });
     scheduleDrain();
     return true;
   }
 
   if (request.type === 'engine-translate-batch' && content) {
-    if (!Array.isArray(request.items) || request.items.length === 0 || request.items.length > BATCH_LIMITS.maxItems) {
+    if (!Array.isArray(request.items) || request.items.length === 0 || request.items.length > MAX_BATCH_REQUEST_ITEMS) {
       reply({ ok: false, error: 'busy' });
       return;
     }
@@ -186,7 +231,17 @@ chrome.runtime.onMessage.addListener((request: EngineRequest, sender, reply: (re
     };
     for (let index = 0; index < request.items.length; index++) {
       const item = request.items[index];
-      if (!item || typeof item.text !== 'string' || item.text.length > MAX_TRANSLATION_CHARS || queue.length >= MAX_QUEUED) {
+      if (!item || typeof item.text !== 'string' || item.text.length > MAX_TRANSLATION_CHARS) {
+        results[index] = { ok: false, error: 'busy' };
+        continue;
+      }
+      const html = Boolean(item.html);
+      const cached = lookupTranslation(request, html, item.text);
+      if (cached !== undefined) {
+        results[index] = { ok: true, value: cached };
+        continue;
+      }
+      if (queue.length >= MAX_QUEUED) {
         results[index] = { ok: false, error: 'busy' };
         continue;
       }
@@ -194,7 +249,7 @@ chrome.runtime.onMessage.addListener((request: EngineRequest, sender, reply: (re
       queue.push({
         pair: request,
         text: item.text,
-        html: Boolean(item.html),
+        html,
         reply: itemReply => {
           results[index] = itemReply;
           remaining--;

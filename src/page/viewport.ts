@@ -22,7 +22,7 @@ export class Viewport {
 
   constructor(
     private readonly signal: AbortSignal,
-    private readonly onSeen: (target: Target) => void,
+    private readonly onSeen: (target: Target, inViewport: boolean) => void,
   ) {
     this.observer = new IntersectionObserver(
       entries => this.onIntersection(entries),
@@ -187,6 +187,8 @@ export class Viewport {
       }
 
       const rendered = element.checkVisibility(boxVisibility) && visibleFrames(element.ownerDocument, frames);
+      const inViewport = element.ownerDocument !== document ||
+        (box.bottom > 0 && box.top < window.innerHeight && box.right > 0 && box.left < window.innerWidth);
       let unclippedOverflow: boolean | undefined;
       let hasDeferred = false;
 
@@ -215,7 +217,7 @@ export class Viewport {
           continue;
         }
         this.forget(target);
-        this.onSeen(target);
+        this.onSeen(target, inViewport);
       }
       if (hasDeferred && group.size) this.deferred.add(element);
     }

@@ -639,3 +639,32 @@ test('translates same-origin shadow-nested iframes while surfacing a muted notic
     await new Promise<void>(resolve => widgetServer.close(() => resolve()));
   }
 });
+
+test('streams short visible labels before slow long paragraphs settle and restores cleanly mid-flight', async () => {
+  const longSentences = Array.from({ length: 8 }, (_, index) =>
+    `<p class="slow-copy">Dies ist ein ausführlicher deutscher Beispielsatz Nummer ${index + 1} mit genügend Text für einen separaten Batch.</p>`,
+  ).join('');
+  await withFakePacks(async ({ page, serve, openPopup }) => {
+    await page.goto(serve('/', `<!doctype html><html lang="de"><body>
+      <h1 id="heading">Kurz</h1>
+      <button id="cta">Kaufen</button>
+      ${longSentences}
+    </body></html>`));
+
+    const popup = await openPopup();
+    await prepare(popup);
+    await installFake(popup, { slow: { minLength: 80, delay: 900 } });
+    await popup.click();
+
+    await expect(page.locator('#heading')).toHaveText('«Kurz»');
+    await expect(page.locator('#cta')).toHaveText('«Kaufen»');
+    await expect(page.locator('.slow-copy').first()).toContainText('Dies ist ein ausführlicher deutscher Beispielsatz');
+    await expect.poll(popup.status).toMatch(/^Translating/);
+
+    await popup.click();
+    await expect(page.locator('#heading')).toHaveText('Kurz');
+    await expect(page.locator('#cta')).toHaveText('Kaufen');
+    await page.waitForTimeout(1_000);
+    await expect(page.locator('.slow-copy').first()).toContainText('Dies ist ein ausführlicher deutscher Beispielsatz');
+  }, ['de:en']);
+});

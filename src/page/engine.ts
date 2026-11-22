@@ -1,10 +1,11 @@
 import { packBatches } from '../shared/batch';
+import { LruCache } from '../shared/cache';
 import { engineRequest, MAX_TRANSLATION_CHARS, OfflineError, requestEngine } from '../shared/offline';
 import type { EngineReply, Pair } from '../shared/offline';
 import { splitText } from '../shared/text';
 
 const REQUEST_TIMEOUT_MS = 45_000;
-const IPC_BATCH_LIMITS = { maxItems: 24, maxChars: 2_400 };
+const IPC_BATCH_LIMITS = { maxItems: 8, maxChars: 600 };
 const CACHE_ENTRIES = 2_048;
 const BUSY_DELAYS = [50, 150, 450] as const;
 
@@ -86,8 +87,21 @@ export async function openEngine(pair: Pair, signal: AbortSignal): Promise<Trans
     const all = queued;
     queued = [];
     if (!all.length) return;
-    for (const batch of packBatches(all, item => item.text.length, IPC_BATCH_LIMITS)) {
-      void dispatchBatch(batch);
+    all.sort((a, b) => a.text.length - b.text.length);
+    const short: PendingItem[] = [];
+    const medium: PendingItem[] = [];
+    const long: PendingItem[] = [];
+    for (const item of all) {
+      const len = item.text.length;
+      if (len <= 40) short.push(item);
+      else if (len <= 120) medium.push(item);
+      else long.push(item);
+    }
+    for (const group of [short, medium, long]) {
+      if (!group.length) continue;
+      for (const batch of packBatches(group, item => item.text.length, IPC_BATCH_LIMITS)) {
+        void dispatchBatch(batch);
+      }
     }
   }
 
@@ -121,7 +135,7 @@ export async function openEngine(pair: Pair, signal: AbortSignal): Promise<Trans
 
 // Reuse in-flight and completed translations of repeated text and inline HTML units.
 export class TranslationCache {
-  private readonly entries = new Map<string, Promise<string>>();
+  private readonly entries = new LruCache<string, Promise<string>>(CACHE_ENTRIES);
 
   constructor(
     private readonly translator: TranslatorInstance,
@@ -152,23 +166,15 @@ export class TranslationCache {
 
   private lookup(key: string, text: string, html: boolean): Promise<string> {
     const present = this.entries.get(key);
-    if (present) {
-      this.entries.delete(key);
-      this.entries.set(key, present);
-      return present;
-    }
+    if (present) return present;
     const pending = this.translator.translate(text, { signal: this.signal, html })
       .then(result => result.trim() || text)
       .catch((error: unknown) => {
-        if (this.entries.get(key) === pending) this.entries.delete(key);
+        if (this.entries.peek(key) === pending) this.entries.delete(key);
         throw error;
       });
 
     this.entries.set(key, pending);
-    if (this.entries.size > CACHE_ENTRIES) {
-      const oldest = this.entries.keys().next();
-      if (!oldest.done) this.entries.delete(oldest.value);
-    }
     return pending;
   }
 }

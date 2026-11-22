@@ -77,8 +77,9 @@ function install(): void {
             state.phase = 'translated';
             state.error = counts.seen === 0 ? 'no-text'
               : counts.seen === counts.failed ? 'translation-failed' : undefined;
-          } else if (counts.seen) {
-            state.error = undefined;
+          } else {
+            state.phase = 'translating';
+            if (counts.seen) state.error = undefined;
           }
           notify();
         },

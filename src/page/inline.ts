@@ -41,7 +41,12 @@ export interface WrittenUnitState {
   textByNode: Map<Text, string>;
 }
 
-export function findInlineUnitRoot(node: Node, page: Document): Element | null {
+export interface KnownInlineRoots {
+  hasUnit(root: Element): boolean;
+  hasFallback(root: Element): boolean;
+}
+
+export function findInlineUnitRoot(node: Node, page: Document, known?: KnownInlineRoots): Element | null {
   let current: Node | null = node;
   if (isText(current)) {
     if (current.assignedSlot) return null;
@@ -50,6 +55,8 @@ export function findInlineUnitRoot(node: Node, page: Document): Element | null {
   while (current && isElement(current)) {
     if (current.shadowRoot || current.assignedSlot) return null;
     if (!INLINE_TAGS.has(current.localName) && !OPAQUE_INLINE_TAGS.has(current.localName)) {
+      if (known?.hasFallback(current)) return null;
+      if (known?.hasUnit(current)) return current;
       if (NON_UNIT_ROOTS.has(current.localName) || !eligible(current, page)) return null;
       return buildInlineUnit(current, page) ? current : null;
     }

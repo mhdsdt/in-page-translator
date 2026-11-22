@@ -31,6 +31,7 @@ export async function withFakePacks(run: (browser: ExtensionBrowser) => Promise<
 
 interface FakeOptions {
   delay?: number;
+  slow?: { minLength: number; delay: number };
   firstSetup?: 'engine-unavailable' | 'missing-packs';
   busy?: Record<string, number>;
   disconnectOnce?: string;
@@ -39,7 +40,7 @@ interface FakeOptions {
 
 export async function installFake(
   popup: Popup,
-  { delay = 0, firstSetup, busy = {}, disconnectOnce, htmlMode = 'wrap' }: FakeOptions = {},
+  { delay = 0, slow, firstSetup, busy = {}, disconnectOnce, htmlMode = 'wrap' }: FakeOptions = {},
 ): Promise<void> {
   await popup.evaluate(`(async () => {
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
@@ -47,12 +48,13 @@ export async function installFake(
       target: { tabId: tab.id },
       args: [
         ${delay},
+        ${JSON.stringify(slow ?? null)},
         ${JSON.stringify(firstSetup ?? null)},
         ${JSON.stringify(busy)},
         ${JSON.stringify(disconnectOnce ?? null)},
         ${JSON.stringify(htmlMode)},
       ],
-      func: (delay, firstSetup, busy, disconnectOnce, htmlMode) => {
+      func: (delay, slow, firstSetup, busy, disconnectOnce, htmlMode) => {
         globalThis.translationCalls = [];
         globalThis.htmlCalls = [];
         globalThis.engineOpens = 0;
@@ -118,7 +120,9 @@ export async function installFake(
               disconnected = true;
               return undefined;
             }
-            if (delay) await new Promise(resolve => setTimeout(resolve, delay));
+            const extra = slow && message.text.length >= slow.minLength ? slow.delay : 0;
+            const wait = delay + extra;
+            if (wait) await new Promise(resolve => setTimeout(resolve, wait));
             return translateOne(message.text, Boolean(message.html));
           }
           if (message.type === 'engine-translate-batch') {
@@ -129,7 +133,9 @@ export async function installFake(
               disconnected = true;
               return undefined;
             }
-            if (delay) await new Promise(resolve => setTimeout(resolve, delay));
+            const extra = slow && items.some(item => item.text.length >= slow.minLength) ? slow.delay : 0;
+            const wait = delay + extra;
+            if (wait) await new Promise(resolve => setTimeout(resolve, wait));
             return { ok: true, value: items.map(item => translateOne(item.text, Boolean(item.html))) };
           }
           return send(message);
