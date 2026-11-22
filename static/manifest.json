@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "In-Page Translator",
-  "version": "1.5.0",
+  "version": "1.5.1",
   "description": "Translate web pages in place with on-device translation.",
   "minimum_chrome_version": "138",
   "permissions": ["activeTab", "scripting", "storage", "offscreen"],
