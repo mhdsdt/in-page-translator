@@ -6,6 +6,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
+import { env, platform } from 'node:process';
 import type { Readable, Writable } from 'node:stream';
 
 interface Target { targetId: string; url: string }
@@ -29,8 +30,10 @@ export async function withExtension(
 
   // The browser-level protocol can install the real unpacked build and invoke its toolbar
   // action with activeTab, without adding test permissions to the manifest.
+  const ciLinuxArgs = platform === 'linux' && env.CI ? ['--no-sandbox', '--disable-dev-shm-usage'] : [];
   const process = spawn(executablePath, [
     '--headless', '--no-first-run', '--no-default-browser-check',
+    ...ciLinuxArgs,
     '--remote-debugging-pipe', '--remote-debugging-port=0', '--enable-unsafe-extension-debugging',
     '--user-data-dir=' + profile, ...args, 'about:blank',
   ], { stdio: ['ignore', 'ignore', 'pipe', 'pipe', 'pipe'] });
