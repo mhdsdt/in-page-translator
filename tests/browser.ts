@@ -156,6 +156,10 @@ export async function withExtension(
           },
           async close() {
             await send('Target.closeTarget', { targetId });
+            await expect.poll(async () => {
+              const targets = await send<{ targetInfos: Target[] }>('Target.getTargets');
+              return targets.targetInfos.some(entry => entry.targetId === targetId);
+            }).toBe(false);
           },
           status: () => evaluate<string>('document.querySelector("#status")?.textContent'),
         };

@@ -509,25 +509,29 @@ test('translates inline HTML sentences as whole units, preserves live DOM & hand
     expect(html.some(s => s.includes('<span id="0">') && s.includes('<code id="2" translate="no">npm test</code>'))).toBe(true);
     expect(html.some(s => s.includes('Erste Karte') && s.includes('Zweite Karte'))).toBe(false);
 
+    // Close popup before clicking the page (page focus dismisses toolbar popups on Linux).
+    await popup.close();
+
     // Live element identity and click handler stay intact.
     expect(await page.evaluate(() => document.getElementById('guide') === (window as unknown as { __origLink: Element }).__origLink)).toBe(true);
     await page.locator('#guide').click();
     await expect(page.locator('#guide')).toHaveAttribute('data-clicks', '1');
 
-    // Restore brings back exact original DOM & text.
-    await popup.click();
+    // Reopen popup and restore exact original DOM & text.
+    const reopened = await openPopup();
+    await expect.poll(reopened.status).toMatch(/^Translated to English/);
+    await reopened.click();
     await expect(page.locator('#inline')).toHaveText('Lesen Sie die offizielle Anleitung und nutzen Sie npm test.');
     await expect(page.locator('#price')).toHaveText('ab 59,00 €');
-    await popup.close();
 
     // Now test reordered inline tags returned by NMT.
-    const reordered = await openPopup();
-    await prepare(reordered);
-    await installFake(reordered, { htmlMode: 'reorder' });
-    await reordered.click();
+    await prepare(reopened);
+    await installFake(reopened, { htmlMode: 'reorder' });
+    await reopened.click();
     await expect(page.locator('#inline')).toHaveText('npm test :: «offizielle» «Anleitung»');
     expect(await page.evaluate(() => document.getElementById('guide') === (window as unknown as { __origLink: Element }).__origLink)).toBe(true);
-    await reordered.click();
+    await expect.poll(reopened.status).toMatch(/^Translated to English/);
+    await reopened.click();
     await expect(page.locator('#inline')).toHaveText('Lesen Sie die offizielle Anleitung und nutzen Sie npm test.');
   }, ['de:en']);
 });
