@@ -48,7 +48,7 @@ npm run test:packs
 
 `npm run models:refresh` explicitly updates the pinned catalog from Mozilla’s released desktop models. Builds use that checked-in catalog. Model files are fetched only when a pack is installed, and each download’s length and decoded file’s SHA-256 digest are checked against the catalog. See [third-party notices](static/THIRD-PARTY-NOTICES.md).
 
-The isolated page script discovers and patches text. The popup owns tab controls and the manager owns pack selection. The offscreen extension document coordinates downloads and IndexedDB, and runs Bergamot inference in a worker. Inference work is batched by route. The worker holds the active route’s models and releases them after two idle minutes.
+The isolated page script discovers and patches text. The popup owns tab controls and the manager owns pack selection. The offscreen extension document coordinates downloads, IndexedDB, and a shared LRU cache, and runs Bergamot inference across a dynamic worker pool. Inference work is length-bucketed and batched by route; the primary worker holds the active route’s models for three idle minutes while burst workers retire after 45 idle seconds.
 
 ## Contribute
 

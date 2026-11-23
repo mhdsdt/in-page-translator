@@ -105,12 +105,19 @@ async function verifySourceModules(errors) {
 
 async function verifyManifestAndDist(errors) {
   const pkg = JSON.parse(await readFile(join(root, 'package.json'), 'utf8'));
+  const pkgLock = JSON.parse(await readFile(join(root, 'package-lock.json'), 'utf8'));
   const staticManifest = JSON.parse(await readFile(join(root, 'static', 'manifest.json'), 'utf8'));
   const distManifest = JSON.parse(await readFile(join(distDir, 'manifest.json'), 'utf8'));
   const modelSource = JSON.parse(await readFile(join(root, 'src', 'shared', 'model-source.json'), 'utf8'));
 
+  if (pkg.dependencies && Object.keys(pkg.dependencies).length > 0) {
+    errors.push(`Runtime dependencies are forbidden in package.json: ${Object.keys(pkg.dependencies).join(', ')}`);
+  }
   if (!/^\d+\.\d+\.\d+$/u.test(pkg.version)) {
     errors.push(`package.json version "${pkg.version}" is not valid X.Y.Z semver`);
+  }
+  if (pkgLock.version !== pkg.version || pkgLock.packages?.['']?.version !== pkg.version) {
+    errors.push(`Version drift: package-lock.json (${pkgLock.version} / ${pkgLock.packages?.['']?.version}) !== package.json (${pkg.version})`);
   }
   if (staticManifest.version !== pkg.version) {
     errors.push(`Version drift: static/manifest.json (${staticManifest.version}) !== package.json (${pkg.version})`);
