@@ -28,8 +28,6 @@ export async function withExtension(
   const bind = server.address();
   if (!bind || typeof bind === 'string') throw new Error('Fixture server did not start');
 
-  // The browser-level protocol can install the real unpacked build and invoke its toolbar
-  // action with activeTab, without adding test permissions to the manifest.
   const ciLinuxArgs = platform === 'linux' && env.CI ? ['--no-sandbox', '--disable-dev-shm-usage'] : [];
   const process = spawn(executablePath, [
     '--headless', '--no-first-run', '--no-default-browser-check',

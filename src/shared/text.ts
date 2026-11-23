@@ -5,8 +5,10 @@ export const TARGET_CHUNK_CHARS = 800;
 const SENTENCE_BREAK = /[\n。！？；.!?;]/u;
 const CJK_SENTENCE_BREAK = /[。！？；]/u;
 
-// Split long text into chunks bounded by maxChars, preferring sentence and word boundaries
-// while keeping UTF-16 surrogate pairs intact.
+function isLowSurrogate(code: number): boolean {
+  return code >= 0xdc00 && code <= 0xdfff;
+}
+
 export function* splitText(
   text: string,
   maxChars = MAX_TRANSLATION_CHARS,
@@ -23,7 +25,6 @@ export function* splitText(
     const floor = start + Math.floor(Math.min(targetChars, maxChars) / 2);
     let end = -1;
 
-    // Prefer sentence boundaries near targetChars for better translation fluency.
     for (let candidate = limit - 1; candidate >= floor; candidate--) {
       const char = text.charAt(candidate);
       if (SENTENCE_BREAK.test(char)) {
@@ -44,16 +45,13 @@ export function* splitText(
     }
     if (end <= start) end = limit;
 
-    // Keep a UTF-16 surrogate pair together when a long input has no boundary.
-    const code = text.charCodeAt(end);
-    if (code >= 0xdc00 && code <= 0xdfff && end > start + 1) end--;
+    if (isLowSurrogate(text.charCodeAt(end)) && end > start + 1) end--;
     yield text.slice(start, end);
     start = end;
   }
   if (start < text.length) yield text.slice(start);
 }
 
-// Parse a computed CSS `content` value when it represents a single quoted string.
 export function unquoteCssContent(raw: string | null | undefined): string | null {
   if (!raw) return null;
   const trimmed = raw.trim();

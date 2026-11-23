@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { packBatches, takeBucketedBatch, takePrefixBatch } from '../../src/shared/batch';
+import {
+  lengthBucket, packBatches, packBucketedBatches, takeBucketedBatch, takePrefixBatch,
+} from '../../src/shared/batch';
 
 test('packBatches respects maxItems, maxChars, order, and handles oversized single items', () => {
   assert.deepEqual(packBatches([], (s: string) => s.length, { maxItems: 4, maxChars: 10 }), []);
@@ -35,11 +37,24 @@ test('takePrefixBatch stops at group boundaries, item cap, and char cap', () => 
     [jobs[0], jobs[1], jobs[2]],
   );
 
-  // Oversized leading item still makes progress as a batch of 1.
   assert.deepEqual(
     takePrefixBatch(jobs, j => j.pair === 'fr:en', j => j.text.length, { maxItems: 10, maxChars: 2 }),
     [jobs[0]],
   );
+});
+
+test('lengthBucket and packBucketedBatches isolate length classes and respect batch limits', () => {
+  assert.equal(lengthBucket(40), 'short');
+  assert.equal(lengthBucket(41), 'medium');
+  assert.equal(lengthBucket(120), 'medium');
+  assert.equal(lengthBucket(121), 'long');
+
+  const items = ['x'.repeat(130), 'x'.repeat(12), 'x'.repeat(60), 'x'.repeat(8), 'x'.repeat(90)];
+  const batches = packBucketedBatches(items, s => s.length, { maxItems: 1, maxChars: 600 });
+  assert.deepEqual(batches.map(b => b[0]!.length), [8, 12, 60, 90, 130]);
+
+  const grouped = packBucketedBatches(items, s => s.length, { maxItems: 8, maxChars: 600 });
+  assert.deepEqual(grouped.map(b => b.map(s => s.length)), [[8, 12], [60, 90], [130]]);
 });
 
 test('takeBucketedBatch separates lengths, honors preferShort/preferLong, prevents starvation, and stops at groups', () => {
@@ -53,26 +68,21 @@ test('takeBucketedBatch separates lengths, honors preferShort/preferLong, preven
     mk('fr:en', 10, 'OTHER'),
   ];
 
-  // preferShort pulls short items first without crossing into fr:en.
   const first = takeBucketedBatch(queue, j => j.pair === 'de:en', j => j.text.length, { preferShort: true });
   assert.deepEqual(first.map(j => j.tag), ['S1', 'S2']);
 
-  // preferLong pulls long items descending without mixing medium M1.
   const second = takeBucketedBatch(queue, j => j.pair === 'de:en', j => j.text.length, { preferLong: true });
   assert.deepEqual(second.map(j => j.tag), ['L2', 'L1']);
 
-  // Remaining de:en item M1 drains cleanly without picking fr:en OTHER.
   const third = takeBucketedBatch(queue, j => j.pair === 'de:en', j => j.text.length);
   assert.deepEqual(third.map(j => j.tag), ['M1']);
   assert.deepEqual(queue.map(j => j.tag), ['OTHER']);
 
-  // Fallback (no preferShort/preferLong) drains oldest item's bucket (L0 included -> zero starvation).
   const antiStarve = [mk('de:en', 150, 'OLD_LONG'), mk('de:en', 15, 'NEW_SHORT'), mk('de:en', 155, 'LONG2')];
   const drained = takeBucketedBatch(antiStarve, () => true, j => j.text.length);
   assert.deepEqual(drained.map(j => j.tag), ['LONG2', 'OLD_LONG']);
   assert.deepEqual(antiStarve.map(j => j.tag), ['NEW_SHORT']);
 
-  // Oversized single item still makes progress as a batch of 1.
   const oversized = [mk('de:en', 1_500, 'HUGE'), mk('de:en', 1_400, 'HUGE2')];
   assert.deepEqual(takeBucketedBatch(oversized, () => true, j => j.text.length).map(j => j.tag), ['HUGE']);
   assert.deepEqual(oversized.map(j => j.tag), ['HUGE2']);

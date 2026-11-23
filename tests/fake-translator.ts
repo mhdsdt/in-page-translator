@@ -17,7 +17,6 @@ export async function withFakePacks(run: (browser: ExtensionBrowser) => Promise<
         const db = request.result;
         const transaction = db.transaction('packs', 'readwrite');
         const store = transaction.objectStore('packs');
-        // These keys make the popup offer Translate. The page worker is mocked below.
         for (const key of keys) store.put(null, key);
         transaction.onabort = () => reject(transaction.error);
         transaction.oncomplete = () => { db.close(); resolve(); };
@@ -115,20 +114,8 @@ export async function installFake(
             attempts++;
             return attempts === 1 && firstSetup ? { ok: false, error: firstSetup } : { ok: true };
           }
-          if (message.type === 'engine-translate') {
-            if (disconnectOnce && !disconnected && message.text === disconnectOnce) {
-              disconnected = true;
-              return undefined;
-            }
-            const extra = slow && message.text.length >= slow.minLength ? slow.delay : 0;
-            const wait = delay + extra;
-            if (wait) await new Promise(resolve => setTimeout(resolve, wait));
-            return translateOne(message.text, Boolean(message.html));
-          }
           if (message.type === 'engine-translate-batch') {
-            const items = Array.isArray(message.items)
-              ? message.items
-              : (message.texts || []).map(text => ({ text, html: false }));
+            const items = Array.isArray(message.items) ? message.items : [];
             if (disconnectOnce && !disconnected && items.some(item => item.text === disconnectOnce)) {
               disconnected = true;
               return undefined;

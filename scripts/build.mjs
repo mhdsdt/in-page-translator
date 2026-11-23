@@ -29,7 +29,6 @@ await cp(new URL('../static/', import.meta.url), dist, {
   filter: source => !source.endsWith('/.DS_Store'),
 });
 
-// Keep built manifest version derived from package.json as single source of truth.
 const manifestUrl = new URL('manifest.json', dist);
 const manifest = JSON.parse(await readFile(manifestUrl, 'utf8'));
 manifest.version = pkg.version;

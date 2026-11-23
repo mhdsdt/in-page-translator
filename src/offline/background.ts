@@ -5,6 +5,7 @@ import { packSelectionKey } from '../shared/protocol';
 import type { PageEvent, PageRequest, PageState } from '../shared/protocol';
 
 const DOCUMENT = 'offline.html';
+const DEFAULT_TITLE = 'In-Page Translator';
 let opening: Promise<void> | undefined;
 
 type BackgroundMessage = EngineRequest | PageEvent | DownloadProgressEvent;
@@ -27,8 +28,9 @@ function ensureDocument(): Promise<void> {
   return opening;
 }
 
-function applyBadge(tabId: number, spec: BadgeSpec): void {
+function applyBadge(tabId: number, spec: BadgeSpec, title = DEFAULT_TITLE): void {
   void chrome.action.setBadgeText({ tabId, text: spec.text }).catch(() => {});
+  void chrome.action.setTitle({ tabId, title }).catch(() => {});
   if (spec.text) {
     void chrome.action.setBadgeBackgroundColor({ tabId, color: spec.color }).catch(() => {});
     void chrome.action.setBadgeTextColor({ tabId, color: '#ffffff' }).catch(() => {});
@@ -65,7 +67,11 @@ async function toggleActiveTab(): Promise<void> {
     rawTarget,
   } satisfies EngineRequest) as EngineReply<void> | undefined;
   if (!reply?.ok) {
-    applyBadge(tab.id, { text: '!', color: '#805015' });
+    const reason = !reply ? 'Translation unavailable'
+      : reply.error === 'unsupported-pair' ? 'Language pair unavailable'
+      : reply.error === 'busy' ? 'Language pack download in progress'
+      : 'Translation couldn’t start';
+    applyBadge(tab.id, { text: '!', color: '#805015' }, `${DEFAULT_TITLE} — ${reason}`);
   }
 }
 

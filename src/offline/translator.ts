@@ -184,7 +184,7 @@ export class Translator {
     );
   }
 
-  maxConcurrency(route: Pack[]): number {
+  maxConcurrency(route: readonly Pack[]): number {
     const count = this.slots.length;
     if (route.length === 1) return count;
     return count >= 3 ? 2 : 1;
@@ -192,10 +192,13 @@ export class Translator {
 
   prepare(route: Pack[]): Promise<void> {
     const primaryReady = this.slots[0]!.use(route, () => undefined);
-    // Speculatively warm one helper slot in parallel without blocking primary readiness.
-    const second = this.slots[1];
-    if (this.maxConcurrency(route) >= 2 && second && second.isIdle() && !second.hasRoute(route)) {
-      void second.use(route, () => undefined).catch(() => {});
+    if (this.maxConcurrency(route) >= 2) {
+      void primaryReady.then(() => {
+        const second = this.slots[1];
+        if (second && second.isIdle() && !second.hasRoute(route)) {
+          void second.use(route, () => undefined).catch(() => {});
+        }
+      }, () => {});
     }
     return primaryReady;
   }
@@ -244,12 +247,10 @@ export class Translator {
     return this.translateOn(slotIndex, route, items);
   }
 
-  // Keep verified buffers briefly in RAM so multiple worker slots skip redundant IndexedDB reads.
   seedPack(pack: Pack, buffers: ModelBuffers): void {
     this.cacheBuffers(packKey(pack), buffers);
   }
 
-  // Start compiling the WASM module ahead of auto-translation while a pack finishes saving.
   warmRuntime(): void {
     this.slots[0]?.warmRuntime();
   }

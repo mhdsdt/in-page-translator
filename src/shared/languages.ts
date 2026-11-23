@@ -5,7 +5,7 @@ export function normalizeLanguage(value: string | undefined): string | undefined
   try {
     const tag = value.trim();
     const locale = new Intl.Locale(tag);
-    // Intl canonicalizes some catalog IDs to codes with different pack directions.
+    // Intl.Locale canonicalizes tl/hbs/no to codes with different pack directions.
     const original = tag.split('-')[0]?.toLowerCase();
     if (original === 'tl' || original === 'hbs' || original === 'no') return original;
     switch (locale.language) {
@@ -33,10 +33,11 @@ export function catalogLanguage(value: string | undefined, supported: readonly s
   return undefined;
 }
 
-const names = new Intl.DisplayNames(['en'], { type: 'language' });
+let displayNames: Intl.DisplayNames | undefined;
 
 export function languageName(code: string): string {
-  return names.of(code) ?? code;
+  displayNames ??= new Intl.DisplayNames(['en'], { type: 'language' });
+  return displayNames.of(code) ?? code;
 }
 
 export function pairName(id: string): string {

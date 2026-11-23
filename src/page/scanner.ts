@@ -2,7 +2,6 @@ import { isElement, isSkippedElement, isText, liveOnPage } from './surface';
 
 const NODES_PER_SLICE = 400;
 
-// Incrementally walks queued DOM subtrees with TreeWalker, rejecting skipped subtrees wholesale.
 export class DomScanner {
   private readonly pending = new Set<Node>();
   private cursor?: { root: Node; walker: TreeWalker };
@@ -32,7 +31,6 @@ export class DomScanner {
     this.cursor = undefined;
   }
 
-  // Returns false when no queued subtrees or active cursors remain.
   step(deadline: number): boolean {
     if (!this.cursor) {
       const next = this.pending.values().next();
@@ -64,7 +62,6 @@ export class DomScanner {
       this.cursor = undefined;
       return;
     }
-    // If the node at the previous yield boundary was removed, restart from its live root.
     if (!liveOnPage(cursor.walker.currentNode, this.document)) {
       cursor.walker.currentNode = cursor.root;
     }

@@ -8,7 +8,6 @@ test('LruCache supports get/peek/set, LRU eviction, delete, clear, and zero capa
   cache.set('b', 2);
   assert.equal(cache.size, 2);
 
-  // peek does not promote 'a', so get('b') leaves 'a' oldest; get('a') promotes 'a'.
   assert.equal(cache.peek('a'), 1);
   assert.equal(cache.get('a'), 1);
   cache.set('c', 3);

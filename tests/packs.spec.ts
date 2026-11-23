@@ -12,7 +12,6 @@ test('installs verified Mozilla packs directly in popup, reuses them offline, pi
       <div style="height:1600px"></div><p id="unseen">Vielen Dank!</p>
     </body></html>`));
 
-    // Download directly from the popup and verify automatic translation on completion.
     const original = await openPopup();
     await expect.poll(original.status).toBe('Download language pack to translate this page.');
     await original.choose('source', 'de');
@@ -33,14 +32,12 @@ test('installs verified Mozilla packs directly in popup, reuses them offline, pi
     await expect(page.locator('h1')).toHaveText('Guten Morgen!');
     await expect(page.locator('#inline')).toHaveText('Lesen Sie die offizielle Anleitung und nutzen Sie npm test.');
 
-    // Open the language pack manager via the header button and verify offline reload from disk.
     const managerPage = page.context().waitForEvent('page');
     await original.evaluate('document.querySelector("#language-packs").click()');
     const manager = await managerPage;
     await expect(manager).toHaveTitle(/Language packs/);
     await expect(manager.getByRole('button', { name: 'Remove German → English' })).toBeVisible();
 
-    // Closing the inference context proves the pack is read back from disk offline.
     await manager.evaluate(() => chrome.offscreen.closeDocument());
     await page.context().setOffline(true);
     await manager.getByRole('button', { name: 'Back to page' }).click();
@@ -59,7 +56,6 @@ test('installs verified Mozilla packs directly in popup, reuses them offline, pi
     await popup.close();
     await page.context().setOffline(false);
 
-    // Install pivot second pack via the manager and translate German -> French via English.
     await manager.bringToFront();
     await manager.locator('#from').selectOption('de');
     await manager.locator('#to').selectOption('fr');
@@ -85,7 +81,6 @@ test('installs verified Mozilla packs directly in popup, reuses them offline, pi
     await expect(page.locator('#inline')).toHaveText('Lesen Sie die offizielle Anleitung und nutzen Sie npm test.');
     await french.close();
 
-    // Remove pack and confirm popup offers Download & translate again.
     await manager.bringToFront();
     await manager.getByRole('button', { name: 'Remove German → English' }).click();
     await expect(manager.locator('#requirements')).toContainText('1 pack to download');

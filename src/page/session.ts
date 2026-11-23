@@ -5,15 +5,14 @@ import { buildInlineUnit, findInlineUnitRoot, isInlineFlowVisible } from './inli
 import type { InlineUnit, KnownInlineRoots } from './inline';
 import { PatchLedger } from './patches';
 import type { Counts } from './patches';
+import { SurfaceTracker } from './roots';
 import { DomScanner } from './scanner';
 import {
-  eligible, fieldAllowed, fieldsOf, frameDocument, hasTranslatableDataAttribute,
-  isElement, isText, isTranslatableButtonInput, isVisibleBlockedFrame, liveOnPage, policyAttributes,
-  readField, textAttributes,
+  eligible, fieldAllowed, fieldsOf, hasTranslatableDataAttribute, isElement, isText,
+  isTranslatableButtonInput, liveOnPage, readField,
 } from './surface';
-import type { Field, SurfaceRoot, Target } from './surface';
+import type { Field, Target } from './surface';
 import { Viewport } from './viewport';
-import { ShadowDiscovery } from './shadow-discovery';
 
 const SLICE_MS = 6;
 const MAX_IN_FLIGHT = 64;
@@ -27,22 +26,18 @@ interface Candidate {
 }
 
 export class PageSession {
-  private readonly observers = new Map<SurfaceRoot, AbortController>();
   private readonly seen = new Map<Target, Candidate[]>();
   private readonly seenLater = new Map<Target, Candidate[]>();
   private readonly seenUnits = new Map<Element, InlineUnit>();
   private readonly seenUnitsLater = new Map<Element, InlineUnit>();
   private readonly inlineRoots = new WeakSet<Element>();
   private readonly inlineFallback = new WeakSet<Element>();
-  private readonly slots = new WeakMap<HTMLSlotElement, Node[]>();
-  private readonly knownFrames = new WeakSet<Element>();
-  private readonly inaccessibleFrames = new Set<Element>();
   private readonly checkedPseudo = new WeakSet<Element>();
   private readonly pendingRepair = new Set<Node>();
   private readonly ledger: PatchLedger;
   private readonly scanner: DomScanner;
   private readonly viewport: Viewport;
-  private readonly shadows: ShadowDiscovery;
+  private readonly roots: SurfaceTracker;
   private readonly knownUnits: KnownInlineRoots;
   private running = false;
   private activeTranslations = 0;
@@ -65,14 +60,26 @@ export class PageSession {
       hasFallback: root => this.inlineFallback.has(root),
     };
     this.scanner = new DomScanner(document, node => this.visit(node));
-    this.shadows = new ShadowDiscovery(signal, root => {
-      if (!liveOnPage(root, this.document)) return;
-      this.needsIdleReport = true;
-      this.observe(root);
-      this.scanner.enqueue(root);
-      this.schedule();
-    });
     this.viewport = new Viewport(signal, (target, inViewport) => this.onTargetSeen(target, inViewport));
+    this.roots = new SurfaceTracker(
+      document,
+      signal,
+      records => this.onChanges(records),
+      (root, lifetime) => this.viewport.listen(root, lifetime),
+      root => {
+        this.needsIdleReport = true;
+        this.scanner.enqueue(root);
+        this.schedule();
+      },
+      (nodes, rescan) => {
+        this.needsIdleReport = true;
+        for (const node of nodes) {
+          this.pendingRepair.add(node);
+          if (rescan) this.scanner.enqueue(node);
+        }
+        this.schedule();
+      },
+    );
     signal.addEventListener('abort', () => this.clearProgressTimer(), { once: true });
   }
 
@@ -80,9 +87,13 @@ export class PageSession {
     this.needsIdleReport = true;
     this.reportedTranslating = false;
     this.initialSettled = false;
-    this.observe(this.document);
+    this.roots.observe(this.document);
     this.scanner.enqueue(this.document);
     this.schedule();
+  }
+
+  blockedFrameCount(): number {
+    return this.roots.blockedFrameCount();
   }
 
   async restore(): Promise<void> {
@@ -90,15 +101,13 @@ export class PageSession {
     this.needsIdleReport = false;
     this.reportedTranslating = false;
     this.initialSettled = false;
-    for (const observer of this.observers.values()) observer.abort();
-    this.observers.clear();
+    this.roots.clear();
     this.scanner.clear();
     this.seen.clear();
     this.seenLater.clear();
     this.seenUnits.clear();
     this.seenUnitsLater.clear();
     this.pendingRepair.clear();
-    this.inaccessibleFrames.clear();
     await this.ledger.restoreAll(SLICE_MS, yieldToPage);
   }
 
@@ -131,11 +140,7 @@ export class PageSession {
       this.inlineRoots.delete(target);
       const unit = !this.inlineFallback.has(target) ? buildInlineUnit(target, this.document) : null;
       if (unit && isInlineFlowVisible(unit)) {
-        const queue = inViewport ? this.seenUnits : this.seenUnitsLater;
-        const other = inViewport ? this.seenUnitsLater : this.seenUnits;
-        if (inViewport) other.delete(target);
-        if (!queue.has(target) && (inViewport || !other.has(target))) {
-          queue.set(target, unit);
+        if (enqueueByPriority(this.seenUnits, this.seenUnitsLater, target, unit, inViewport, false)) {
           this.needsIdleReport = true;
         }
       } else {
@@ -145,14 +150,8 @@ export class PageSession {
     }
 
     const fields = this.candidates(target, includePseudo);
-    if (fields.length) {
-      const queue = inViewport ? this.seen : this.seenLater;
-      const other = inViewport ? this.seenLater : this.seen;
-      if (inViewport) other.delete(target);
-      if (inViewport || !other.has(target)) {
-        queue.set(target, fields);
-        this.needsIdleReport = true;
-      }
+    if (fields.length && enqueueByPriority(this.seen, this.seenLater, target, fields, inViewport, true)) {
+      this.needsIdleReport = true;
     }
     if (this.hasQueued() || this.scanner.hasWork) this.schedule();
   }
@@ -163,31 +162,6 @@ export class PageSession {
       this.scanner.enqueue(node);
     }
     this.needsIdleReport = true;
-  }
-
-  private observe(root: SurfaceRoot): void {
-    if (this.observers.has(root)) return;
-    const observer = new MutationObserver(records => this.onChanges(records));
-    observer.observe(root, {
-      subtree: true,
-      childList: true,
-      characterData: true,
-      attributes: true,
-      attributeOldValue: true,
-      attributeFilter: [...textAttributes, ...policyAttributes, 'style', 'slot'],
-    });
-    const lifetime = new AbortController();
-    lifetime.signal.addEventListener('abort', () => observer.disconnect(), { once: true });
-    this.viewport.listen(root, lifetime.signal);
-    if (root.nodeType === Node.DOCUMENT_FRAGMENT_NODE) {
-      root.addEventListener('slotchange', event => {
-        const slot = event.target as HTMLSlotElement;
-        if (typeof slot?.assignedNodes !== 'function') return;
-        this.queueAssigned(slot);
-        this.schedule();
-      }, { signal: lifetime.signal });
-    }
-    this.observers.set(root, lifetime);
   }
 
   private onChanges(records: MutationRecord[]): void {
@@ -258,8 +232,8 @@ export class PageSession {
           this.scanner.enqueue(record.target);
           this.pendingRepair.add(record.target);
           changed = true;
-        } else if (name) {
-          if (this.onFieldChange(record.target, name as Field)) changed = true;
+        } else if (name && this.onFieldChange(record.target, name as Field)) {
+          changed = true;
         }
       }
     }
@@ -345,29 +319,21 @@ export class PageSession {
       const candidateQueue = this.seen.size ? this.seen
         : !this.seenUnits.size && this.seenLater.size ? this.seenLater
           : undefined;
-      if (candidateQueue) {
-        const next = candidateQueue.entries().next();
-        if (!next.done) {
-          const [target, fields] = next.value;
-          candidateQueue.delete(target);
-          launched = true;
-          for (const candidate of fields) void this.translateCandidate(candidate);
-          continue;
-        }
+      const nextCandidate = candidateQueue && takeFirst(candidateQueue);
+      if (nextCandidate) {
+        launched = true;
+        for (const candidate of nextCandidate[1]) void this.translateCandidate(candidate);
+        continue;
       }
 
       const unitQueue = this.seenUnits.size ? this.seenUnits
         : this.seenUnitsLater.size ? this.seenUnitsLater
           : undefined;
-      if (unitQueue) {
-        const next = unitQueue.entries().next();
-        if (!next.done) {
-          const [root, unit] = next.value;
-          unitQueue.delete(root);
-          launched = true;
-          void this.translateUnit(unit);
-          continue;
-        }
+      const nextUnit = unitQueue && takeFirst(unitQueue);
+      if (nextUnit) {
+        launched = true;
+        void this.translateUnit(nextUnit[1]);
+        continue;
       }
       break;
     }
@@ -378,33 +344,34 @@ export class PageSession {
     return launched;
   }
 
-  private async translateCandidate(candidate: Candidate): Promise<void> {
-    const { node, field, original } = candidate;
-    if (this.signal.aborted || !this.matches(candidate) || !this.ledger.beginAttempt(node, field, original)) return;
+  private async executeAttempt<R>(
+    request: () => Promise<R>,
+    stillValid: () => boolean,
+    onCancel: () => void,
+    onError: (retryAfterExit: boolean) => void,
+    onSuccess: (result: R) => void,
+  ): Promise<void> {
     this.activeTranslations++;
     this.needsIdleReport = true;
     try {
-      let written: string;
+      let result: R;
       try {
-        written = await this.cache.translate(original);
+        result = await request();
       } catch (error) {
         if (this.signal.aborted) return;
-        if (!this.matches(candidate)) {
-          this.ledger.cancelAttempt(node, field, original);
+        if (!stillValid()) {
+          onCancel();
           return;
         }
-        const retryAfterExit = error instanceof OfflineError && error.code === 'busy';
-        this.ledger.recordFailure(node, field, original, retryAfterExit);
-        if (retryAfterExit) this.viewport.observe(node, true);
+        onError(error instanceof OfflineError && error.code === 'busy');
         return;
       }
       if (this.signal.aborted) return;
-      if (!this.matches(candidate)) {
-        // Node changed or temporarily became ineligible mid-flight; don't poison future scans.
-        this.ledger.cancelAttempt(node, field, original);
+      if (!stillValid()) {
+        onCancel();
         return;
       }
-      this.ledger.applyTranslation(node, field, original, written);
+      onSuccess(result);
     } finally {
       this.activeTranslations--;
       if (!this.signal.aborted) {
@@ -414,52 +381,53 @@ export class PageSession {
     }
   }
 
-  private async translateUnit(unit: InlineUnit): Promise<void> {
-    if (this.signal.aborted || !this.matchesUnit(unit) || !this.ledger.beginInlineAttempt(unit)) return;
-    this.activeTranslations++;
-    this.needsIdleReport = true;
-    try {
-      let translatedHtml: string;
-      try {
-        translatedHtml = await this.cache.translateHtml(unit.html);
-      } catch (error) {
-        if (this.signal.aborted) return;
-        if (!this.matchesUnit(unit)) {
-          this.ledger.cancelInlineAttempt(unit.root, unit.html);
-          return;
-        }
-        const retryAfterExit = error instanceof OfflineError && error.code === 'busy';
+  private translateCandidate(candidate: Candidate): Promise<void> {
+    const { node, field, original } = candidate;
+    if (this.signal.aborted || !this.matches(candidate) || !this.ledger.beginAttempt(node, field, original)) {
+      return Promise.resolve();
+    }
+    return this.executeAttempt(
+      () => this.cache.translate(original),
+      () => this.matches(candidate),
+      () => this.ledger.cancelAttempt(node, field, original),
+      retryAfterExit => {
+        this.ledger.recordFailure(node, field, original, retryAfterExit);
+        if (retryAfterExit) this.viewport.observe(node, true);
+      },
+      written => this.ledger.applyTranslation(node, field, original, written),
+    );
+  }
+
+  private translateUnit(unit: InlineUnit): Promise<void> {
+    if (this.signal.aborted || !this.matchesUnit(unit) || !this.ledger.beginInlineAttempt(unit)) {
+      return Promise.resolve();
+    }
+    return this.executeAttempt(
+      () => this.cache.translateHtml(unit.html),
+      () => this.matchesUnit(unit),
+      () => this.ledger.cancelInlineAttempt(unit.root, unit.html),
+      retryAfterExit => {
         this.ledger.recordInlineFailure(unit.root, unit.html, retryAfterExit);
         if (retryAfterExit) {
           this.inlineRoots.add(unit.root);
           this.viewport.observe(unit.root, true);
         }
-        return;
-      }
-      if (this.signal.aborted) return;
-      if (!this.matchesUnit(unit)) {
-        this.ledger.cancelInlineAttempt(unit.root, unit.html);
-        return;
-      }
-      const parsed = parseInlineHtml(translatedHtml, unit.slotIds);
-      if (!validateInlineTranslation(parsed, unit.slotIds, unit.opaqueIds)) {
-        this.ledger.cancelInlineAttempt(unit.root, unit.html);
-        this.inlineFallback.add(unit.root);
-        this.enqueueInlineFallback(unit.root);
-        return;
-      }
-      this.ledger.applyInlineTranslation(unit, parsed.nodes);
-    } finally {
-      this.activeTranslations--;
-      if (!this.signal.aborted) {
-        this.scheduleProgressReport();
-        this.schedule();
-      }
-    }
+      },
+      translatedHtml => {
+        const parsed = parseInlineHtml(translatedHtml, unit.slotIds);
+        if (!validateInlineTranslation(parsed, unit.slotIds, unit.opaqueIds)) {
+          this.ledger.cancelInlineAttempt(unit.root, unit.html);
+          this.inlineFallback.add(unit.root);
+          this.enqueueInlineFallback(unit.root);
+          return;
+        }
+        this.ledger.applyInlineTranslation(unit, parsed.nodes);
+      },
+    );
   }
 
   private visit(node: Node): void {
-    if (isElement(node)) this.discoverRoots(node);
+    if (isElement(node)) this.roots.inspect(node);
     if (isText(node) && !this.seen.has(node) && !this.seenLater.has(node)) {
       if (this.ledger.unitFor(node)) return;
       const fields = fieldsOf(node);
@@ -497,47 +465,6 @@ export class PageSession {
     return batch;
   }
 
-  private discoverRoots(element: Element): void {
-    this.shadows.inspect(element);
-    if (isSlot(element) && !this.slots.has(element)) this.slots.set(element, element.assignedNodes());
-    if (element.localName === 'iframe' || element.localName === 'frame') {
-      if (!this.knownFrames.has(element)) {
-        this.knownFrames.add(element);
-        element.addEventListener('load', () => {
-          this.needsIdleReport = true;
-          this.pendingRepair.add(element);
-          this.discoverFrame(element);
-          this.schedule();
-        }, { signal: this.signal });
-      }
-      this.discoverFrame(element);
-    }
-  }
-
-  blockedFrameCount(): number {
-    let count = 0;
-    for (const frame of this.inaccessibleFrames) {
-      if (!liveOnPage(frame, this.document) || frameDocument(frame) !== null) {
-        this.inaccessibleFrames.delete(frame);
-        continue;
-      }
-      if (isVisibleBlockedFrame(frame, this.document)) count++;
-    }
-    return count;
-  }
-
-  private discoverFrame(element: Element): void {
-    const nested = frameDocument(element);
-    if (!nested) {
-      if (eligible(element, this.document)) this.inaccessibleFrames.add(element);
-      return;
-    }
-    this.inaccessibleFrames.delete(element);
-    if (!eligible(element, this.document)) return;
-    this.observe(nested);
-    this.scanner.enqueue(nested);
-  }
-
   private matchesUnit(unit: InlineUnit): boolean {
     if (!eligible(unit.root, this.document)) return false;
     const current = buildInlineUnit(unit.root, this.document);
@@ -549,15 +476,8 @@ export class PageSession {
   }
 
   private async repair(): Promise<void> {
-    // Check removed or newly excluded subtrees, leaving unrelated patches alone.
-    for (const [root, observer] of this.observers) {
-      if (!liveOnPage(root, this.document)) {
-        observer.abort();
-        this.observers.delete(root);
-        this.pendingRepair.add(root);
-      } else if (!eligible(root, this.document)) {
-        this.pendingRepair.add(root);
-      }
+    for (const root of this.roots.collectInvalidRoots()) {
+      this.pendingRepair.add(root);
     }
 
     let deadline = performance.now() + SLICE_MS;
@@ -576,23 +496,10 @@ export class PageSession {
     }
   }
 
-  private queueAssigned(slot: HTMLSlotElement): void {
-    const current = slot.assignedNodes();
-    for (const node of new Set([...(this.slots.get(slot) ?? []), ...current])) {
-      this.pendingRepair.add(node);
-      this.scanner.enqueue(node);
-    }
-    this.slots.set(slot, current);
-  }
-
   private repairTarget(node: Target): void {
     const allowed = eligible(node, this.document);
     if (isElement(node)) {
-      if (!liveOnPage(node, this.document)) {
-        this.shadows.forget(node);
-        this.inaccessibleFrames.delete(node);
-      }
-      if (isSlot(node)) this.queueAssigned(node);
+      this.roots.onElementRepaired(node, liveOnPage(node, this.document));
     }
     const unitBefore = !allowed ? this.ledger.unitFor(node) : undefined;
     this.ledger.repairNode(node, allowed);
@@ -612,19 +519,38 @@ export class PageSession {
       this.seen.delete(node);
       this.seenLater.delete(node);
     } else if (isText(node)) {
-      // A moved text node may now have a different clipping element.
       this.viewport.forget(node);
       this.scanner.enqueue(node);
     }
   }
 }
 
-function isSlot(element: Element): element is HTMLSlotElement {
-  return element.localName === 'slot' && typeof (element as HTMLSlotElement).assignedNodes === 'function';
+function enqueueByPriority<K, V>(
+  primary: Map<K, V>,
+  secondary: Map<K, V>,
+  key: K,
+  value: V,
+  inViewport: boolean,
+  overwritePrimary: boolean,
+): boolean {
+  const queue = inViewport ? primary : secondary;
+  const other = inViewport ? secondary : primary;
+  if (inViewport) other.delete(key);
+  if ((overwritePrimary || !queue.has(key)) && (inViewport || !other.has(key))) {
+    queue.set(key, value);
+    return true;
+  }
+  return false;
+}
+
+function takeFirst<K, V>(map: Map<K, V>): [K, V] | undefined {
+  const next = map.entries().next();
+  if (next.done) return undefined;
+  map.delete(next.value[0]);
+  return next.value;
 }
 
 function yieldToPage(): Promise<void> {
-  // Task scheduling keeps input responsive even when all translations hit the cache.
   const scheduler = (globalThis as typeof globalThis & { scheduler?: { yield(): Promise<void> } }).scheduler;
   if (typeof scheduler?.yield === 'function') return scheduler.yield();
   return new Promise(resolve => window.setTimeout(resolve, 0));

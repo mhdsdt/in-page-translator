@@ -28,7 +28,6 @@ test('splitText prefers sentence boundaries for Latin and CJK text', () => {
 });
 
 test('splitText never splits UTF-16 surrogate pairs on unbroken emoji strings', () => {
-  // Each emoji is 2 UTF-16 code units; odd maxChars would slice mid-pair without surrogate protection.
   const emojis = '😀'.repeat(100);
   const chunks = Array.from(splitText(emojis, 51, 35));
   assert.equal(chunks.join(''), emojis);
@@ -57,7 +56,6 @@ test('property: splitText is lossless and respects maxChars across 200 randomize
     assert.equal(chunks.join(''), input, `lossy split on trial ${trial}`);
     for (const chunk of chunks) {
       assert.ok(chunk.length > 0 && chunk.length <= MAX_TRANSLATION_CHARS, `invalid chunk size ${chunk.length}`);
-      // Ensure no dangling lone surrogates were created at chunk boundaries.
       const first = chunk.charCodeAt(0);
       const last = chunk.charCodeAt(chunk.length - 1);
       assert.ok(!(first >= 0xdc00 && first <= 0xdfff), 'leading low surrogate');

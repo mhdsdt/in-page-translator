@@ -1,11 +1,9 @@
-import { catalog, formatSize, inputs, outputs, packBytes, routeFor } from '../shared/catalog';
-import type { Pack } from '../shared/catalog';
-import {
-  downloadProgressRatio, formatDownloadBytes, formatDownloadFailure, formatDownloadLabel, totalPackBytes,
-} from '../shared/format';
+import { inputs, outputs } from '../shared/catalog';
 import { fillLanguages, pairName } from '../shared/languages';
 import { engineRequest, OfflineError, requestEngine } from '../shared/offline';
 import type { PackStatus } from '../shared/offline';
+import { derivePacksView } from './view';
+import type { InstalledPackView, RouteStepView } from './view';
 
 const from = document.querySelector<HTMLSelectElement>('#from')!;
 const to = document.querySelector<HTMLSelectElement>('#to')!;
@@ -123,36 +121,38 @@ async function change(action: () => Promise<void>, success?: string): Promise<vo
 }
 
 function render(): void {
-  const route = routeFor(from.value, to.value);
-  const installed = new Set(state?.installed);
-  const missing = route.filter(pack => !installed.has(pack.id));
-  const active = state?.download;
-  const blocked = pending || Boolean(active);
-  install.disabled = blocked || !state || !missing.length;
-  const ready = Boolean(state && route.length && !missing.length);
-  setText(routeSummary, route.length > 1 ? 'This pair translates through English.'
-    : 'Choose the languages you want to translate between.');
-  setText(requirements, !route.length
-    ? from.value === to.value ? 'Choose two different languages.' : 'This language pair is unavailable.'
-    : !state ? readFailed ? 'Pack status unavailable.' : 'Checking installed packs…'
-    : missing.length ? missing.length + (missing.length === 1 ? ' pack' : ' packs') +
-      ' to download · ' + formatSize(totalPackBytes(missing, 'size'))
-    : returnPage.hidden ? 'Ready offline. Open the extension on a web page to translate.'
-    : 'Ready offline. Go back to your page and reopen the extension.');
-  requirements.dataset.ready = String(ready);
-  install.hidden = ready;
-  renderRoute(route, state ? installed : undefined);
+  const view = derivePacksView({
+    from: from.value,
+    to: to.value,
+    state,
+    pending,
+    readFailed,
+    canReturnToPage: !returnPage.hidden,
+    notice,
+  });
 
-  transfer.hidden = !active;
-  installBar.hidden = Boolean(active);
-  if (active) {
-    cancel.disabled = pending || active.saving;
-    progress.value = downloadProgressRatio(active);
-    setText(transferLabel, formatDownloadLabel(active));
-    setText(transferBytes, active.saving ? '' : formatDownloadBytes(active));
+  install.disabled = view.installDisabled;
+  setText(routeSummary, view.routeSummary);
+  setText(requirements, view.requirementsText);
+  requirements.dataset.ready = String(view.ready);
+  install.hidden = view.installHidden;
+  renderRoute(view.route);
+
+  transfer.hidden = view.transferHidden;
+  installBar.hidden = view.installBarHidden;
+  if (!view.transferHidden) {
+    cancel.disabled = view.cancelDisabled;
+    progress.value = view.progressRatio;
+    setText(transferLabel, view.transferLabel);
+    setText(transferBytes, view.transferBytes);
   }
-  renderNotice();
-  renderInstalled(installed, blocked);
+  setText(message, view.noticeText);
+  message.dataset.error = String(view.noticeError);
+
+  empty.hidden = !view.installedEmpty;
+  setText(usage, view.usageText);
+  renderInstalled(view.installedList, view.actionsBlocked);
+
   if (focusInstall && state) {
     focusInstall = false;
     if (document.activeElement === document.body && !install.disabled) install.focus();
@@ -160,52 +160,45 @@ function render(): void {
   if (transferFocus && !pending) {
     const focused = document.activeElement;
     if (focused !== document.body && focused !== cancel && focused !== install) transferFocus = false;
-    else if (active && !cancel.disabled) cancel.focus();
-    else if (!active) {
+    else if (!view.transferHidden && !view.cancelDisabled) cancel.focus();
+    else if (view.transferHidden) {
       transferFocus = false;
-      (ready ? returnPage.hidden ? requirements : returnPage : install.disabled ? from : install).focus();
+      (view.ready ? returnPage.hidden ? requirements : returnPage : view.installDisabled ? from : install).focus();
     }
   }
 }
 
-function renderRoute(route: Pack[], installed: Set<string> | undefined): void {
-  const key = JSON.stringify([route.map(pack => pack.id), installed && route.map(pack => installed.has(pack.id))]);
+function renderRoute(steps: readonly RouteStepView[]): void {
+  const key = JSON.stringify(steps);
   if (key === routeKey) return;
   routeKey = key;
-  const items: HTMLLIElement[] = [];
-  for (const pack of route) {
-    const owned = installed?.has(pack.id) ?? false;
+  const items = steps.map(step => {
     const item = document.createElement('li');
-    item.dataset.installed = String(owned);
+    item.dataset.installed = String(step.installed);
     const size = document.createElement('span');
     size.className = 'route-size';
-    size.textContent = owned ? 'Installed' : installed ? formatSize(packBytes(pack, 'size')) : '';
-    item.append(icon(owned ? 'i-check' : 'i-download'), pairName(pack.id), size);
-    items.push(item);
-  }
+    size.textContent = step.sizeText;
+    item.append(icon(step.installed ? 'i-check' : 'i-download'), step.label, size);
+    return item;
+  });
   routeList.replaceChildren(...items);
 }
 
-function renderInstalled(installed: Set<string>, blocked: boolean): void {
-  const ids = [...installed].sort((a, b) => pairName(a).localeCompare(pairName(b), 'en'));
-  empty.hidden = ids.length > 0 || !state;
-  setText(usage, !state ? readFailed ? 'Storage status unavailable' : 'Checking storage…' : ids.length
-    ? ids.length + (ids.length === 1 ? ' pack · ' : ' packs · ') +
-      formatSize(ids.reduce((bytes, id) => bytes + packBytes(catalog.get(id)!, 'bytes'), 0)) + ' on disk'
-    : '0 MiB on disk');
-  const key = JSON.stringify(ids);
+function renderInstalled(installedList: readonly InstalledPackView[], blocked: boolean): void {
+  const key = JSON.stringify(installedList.map(pack => pack.id));
   if (key !== listKey) {
     listKey = key;
     const before = seen;
-    const fresh = state && before ? new Set(ids.filter(id => !before.has(id))) : new Set<string>();
-    if (state) seen = new Set(ids);
-    list.replaceChildren(...ids.map(id => packRow(id, fresh.has(id))));
+    const fresh = state && before
+      ? new Set(installedList.filter(pack => !before.has(pack.id)).map(pack => pack.id))
+      : new Set<string>();
+    if (state) seen = new Set(installedList.map(pack => pack.id));
+    list.replaceChildren(...installedList.map(pack => packRow(pack, fresh.has(pack.id))));
   }
   for (const button of list.querySelectorAll('button')) button.disabled = blocked;
 }
 
-function packRow(id: string, fresh: boolean): HTMLLIElement {
-  const pack = catalog.get(id)!;
+function packRow(pack: InstalledPackView, fresh: boolean): HTMLLIElement {
   const row = document.createElement('li');
   row.className = 'pack';
   if (fresh) row.dataset.fresh = 'true';
@@ -214,19 +207,19 @@ function packRow(id: string, fresh: boolean): HTMLLIElement {
   detail.className = 'pack-text';
   const name = document.createElement('span');
   name.className = 'pack-name';
-  name.textContent = pairName(id);
+  name.textContent = pack.name;
   const bytes = document.createElement('small');
-  bytes.textContent = formatSize(packBytes(pack, 'bytes'));
+  bytes.textContent = pack.sizeText;
   detail.append(name, bytes);
 
   const remove = document.createElement('button');
   remove.type = 'button';
   remove.className = 'button button-danger';
-  remove.setAttribute('aria-label', 'Remove ' + pairName(id));
+  remove.setAttribute('aria-label', 'Remove ' + pack.name);
   remove.append(icon('i-trash'), 'Remove');
   remove.addEventListener('click', async () => {
     const focused = document.activeElement === remove;
-    await change(() => requestEngine({ type: 'packs-remove', id }), 'Removed ' + pairName(id) + '.');
+    await change(() => requestEngine({ type: 'packs-remove', id: pack.id }), 'Removed ' + pairName(pack.id) + '.');
     if (focused && document.activeElement === document.body) {
       (remove.isConnected ? remove : installedTitle).focus();
     }
@@ -248,16 +241,4 @@ function icon(name: string): SVGSVGElement {
 
 function setText(node: Element, text: string): void {
   if (node.textContent !== text) node.textContent = text;
-}
-
-function renderNotice(): void {
-  let current = readFailed
-    ? { text: 'Couldn’t read installed language packs. Reload the manager to try again.', error: true }
-    : notice;
-  const failure = state?.failure;
-  if (!current && failure && !state?.download && !pending) {
-    current = { text: formatDownloadFailure(failure), error: true };
-  }
-  setText(message, current?.text ?? '');
-  message.dataset.error = String(current?.error ?? false);
 }

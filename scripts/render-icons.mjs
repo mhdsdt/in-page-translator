@@ -1,7 +1,6 @@
 import { chromium } from '@playwright/test';
 import { readFile } from 'node:fs/promises';
 
-// Rasterizes the SVG brand mark into the PNG sizes the manifest requires.
 const icons = new URL('../static/icons/', import.meta.url);
 const svg = await readFile(new URL('mark.svg', icons), 'utf8');
 

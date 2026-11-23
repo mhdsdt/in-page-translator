@@ -47,7 +47,6 @@ export interface PackStatus {
 interface Calls {
   'engine-open': { request: object; result: void };
   'engine-prepare': { request: Pair; result: void };
-  'engine-translate': { request: Pair & { text: string; html?: boolean }; result: string };
   'engine-translate-batch': { request: Pair & { items: TranslateItem[] }; result: EngineReply<string>[] };
   'packs-state': { request: object; result: PackStatus };
   'packs-install': { request: Pair & { autoTranslate?: AutoTranslateTarget }; result: void };

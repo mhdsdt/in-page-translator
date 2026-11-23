@@ -68,7 +68,6 @@ test('translates the page in place, observes new text and restores the latest or
     await expect(page.locator('#button')).toHaveAttribute('aria-label', '«Voir le panier»');
     await expect(page.locator('#live')).toHaveText('«Nouvelles locales»');
 
-    // An opt-out added at runtime removes prior patches. Removing it resumes translation.
     await page.locator('#widget').evaluate(node => node.setAttribute('translate', 'no'));
     await expect(page.locator('#widget p')).toHaveText('Dans le widget');
     await page.locator('#widget').evaluate(node => node.removeAttribute('translate'));

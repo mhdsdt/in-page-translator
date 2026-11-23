@@ -107,7 +107,6 @@ function install(): void {
   }
 
   chrome.runtime.onMessage.addListener((request: PageRequest, sender, reply) => {
-    // Accept only extension-owned contexts (popup and background service worker), never content scripts.
     if (sender.id !== chrome.runtime.id || sender.tab) return;
     if (request.type === 'start') {
       void start(request.source, request.target);

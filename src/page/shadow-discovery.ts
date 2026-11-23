@@ -5,8 +5,7 @@ const HOSTS = new Set([
 const HOSTS_PER_CHECK = 160;
 const CHECK_INTERVAL_MS = 500;
 
-// Attaching a new root does not emit a DOM mutation. Check visible candidates
-// in small rotating batches rather than patching attachShadow on the page.
+// attachShadow emits no MutationObserver record, so poll visible candidate hosts.
 export class ShadowDiscovery {
   private readonly watched = new WeakSet<Element>();
   private readonly visible = new Set<Element>();
@@ -18,10 +17,7 @@ export class ShadowDiscovery {
       if (this.signal.aborted) return;
       for (const { target, isIntersecting, boundingClientRect } of entries) {
         if (!this.watched.has(target)) continue;
-        // Boxless hosts can render their shadow children without intersecting themselves.
-        const boxless = !isIntersecting && !boundingClientRect.width && !boundingClientRect.height &&
-          target.ownerDocument.defaultView?.getComputedStyle(target).display === 'contents';
-        if (isIntersecting || boxless) this.visible.add(target);
+        if (isIntersecting || isBoxlessContentsHost(target, boundingClientRect)) this.visible.add(target);
         else this.visible.delete(target);
       }
       this.schedule();
@@ -71,4 +67,9 @@ export class ShadowDiscovery {
       this.schedule();
     }, CHECK_INTERVAL_MS);
   };
+}
+
+function isBoxlessContentsHost(target: Element, rect: DOMRectReadOnly): boolean {
+  return !rect.width && !rect.height &&
+    target.ownerDocument.defaultView?.getComputedStyle(target).display === 'contents';
 }

@@ -3,7 +3,18 @@ export interface BatchLimits {
   maxChars: number;
 }
 
-// Split items into contiguous character-budgeted batches without reordering.
+export type LengthBucket = 'short' | 'medium' | 'long';
+
+const SHORT_MAX_CHARS = 40;
+const MEDIUM_MAX_CHARS = 120;
+const DEFAULT_SCAN_LIMIT = 96;
+
+export function lengthBucket(length: number): LengthBucket {
+  if (length <= SHORT_MAX_CHARS) return 'short';
+  if (length <= MEDIUM_MAX_CHARS) return 'medium';
+  return 'long';
+}
+
 export function packBatches<T>(
   items: readonly T[],
   textLength: (item: T) => number,
@@ -27,7 +38,22 @@ export function packBatches<T>(
   return batches;
 }
 
-// Take a prefix batch from a FIFO queue that shares the leading group key and fits the budget.
+export function packBucketedBatches<T>(
+  items: readonly T[],
+  textLength: (item: T) => number,
+  limits: BatchLimits,
+): T[][] {
+  if (!items.length) return [];
+  const sorted = items.slice().sort((a, b) => textLength(a) - textLength(b));
+  const groups: Record<LengthBucket, T[]> = { short: [], medium: [], long: [] };
+  for (const item of sorted) groups[lengthBucket(textLength(item))].push(item);
+  const batches: T[][] = [];
+  for (const bucket of ['short', 'medium', 'long'] as const) {
+    if (groups[bucket].length) batches.push(...packBatches(groups[bucket], textLength, limits));
+  }
+  return batches;
+}
+
 export function takePrefixBatch<T>(
   queue: readonly T[],
   sameGroup: (item: T) => boolean,
@@ -57,14 +83,9 @@ interface BucketEntry<T> {
   index: number;
   item: T;
   length: number;
-  bucket: 'short' | 'medium' | 'long';
+  bucket: LengthBucket;
 }
 
-const SHORT_MAX_CHARS = 40;
-const MEDIUM_MAX_CHARS = 120;
-const DEFAULT_SCAN_LIMIT = 96;
-
-// Group queued items by similar length to minimize NMT sequence padding and head-of-line blocking.
 export function takeBucketedBatch<T>(
   queue: T[],
   sameGroup: (item: T) => boolean,
@@ -81,7 +102,7 @@ export function takeBucketedBatch<T>(
     const item = queue[index]!;
     if (!sameGroup(item)) break;
     const length = textLength(item);
-    const bucket = length <= SHORT_MAX_CHARS ? 'short' : length <= MEDIUM_MAX_CHARS ? 'medium' : 'long';
+    const bucket = lengthBucket(length);
     const entry: BucketEntry<T> = { index, item, length, bucket };
     head ??= entry;
     if (bucket === 'short') short.push(entry);
@@ -92,7 +113,7 @@ export function takeBucketedBatch<T>(
   if (!head) return [];
 
   let chosen: BucketEntry<T>[];
-  let bucketKind: BucketEntry<T>['bucket'];
+  let bucketKind: LengthBucket;
   if (options.preferShort && short.length > 0) {
     bucketKind = 'short';
     chosen = short.sort((a, b) => a.length - b.length || a.index - b.index);

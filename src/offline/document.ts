@@ -1,6 +1,7 @@
 import { takeBucketedBatch, takePrefixBatch } from '../shared/batch';
 import { LruCache } from '../shared/cache';
 import { inputs, outputs, routeFor } from '../shared/catalog';
+import type { Pack } from '../shared/catalog';
 import { catalogLanguage } from '../shared/languages';
 import { MAX_TRANSLATION_CHARS, OfflineError } from '../shared/offline';
 import type {
@@ -51,6 +52,7 @@ const packs = new Packs({
 });
 
 const queue: Job[] = [];
+const warmingRoutes = new Set<string>();
 let inFlight = 0;
 let burstBatches = 0;
 let coalesceTimer: number | undefined;
@@ -85,6 +87,16 @@ function scheduleDrain(): void {
   pump();
 }
 
+function maybeWarmExtra(pair: Pair, route: readonly Pack[], pendingCount: number): void {
+  const key = pair.from + ':' + pair.to;
+  if (warmingRoutes.has(key)) return;
+  const desired = Math.min(translator.maxConcurrency(route), 1 + Math.ceil(pendingCount / 8));
+  warmingRoutes.add(key);
+  void packs.route(pair)
+    .then(verified => translator.warmExtra(verified, desired, scheduleDrain), () => {})
+    .finally(() => warmingRoutes.delete(key));
+}
+
 function pump(): void {
   while (queue.length) {
     const { pair } = queue[0]!;
@@ -110,8 +122,7 @@ function pump(): void {
     const slotIndex = translator.acquireReadySlot(route);
     if (slotIndex === undefined) {
       if (queuedItems >= 6 || queuedChars >= 240) {
-        const desired = Math.min(translator.maxConcurrency(route), 1 + Math.ceil(queuedItems / 8));
-        void packs.route(pair).then(verified => translator.warmExtra(verified, desired, scheduleDrain), () => {});
+        maybeWarmExtra(pair, route, queuedItems);
       }
       break;
     }
@@ -132,8 +143,7 @@ function pump(): void {
     });
 
     if (queue.length >= 6) {
-      const desired = Math.min(translator.maxConcurrency(route), 1 + Math.ceil(queue.length / 8));
-      void packs.route(pair).then(verified => translator.warmExtra(verified, desired, scheduleDrain), () => {});
+      maybeWarmExtra(pair, route, queue.length);
     }
   }
 }
@@ -170,19 +180,22 @@ async function processBatch(slotIndex: number, pair: Pair, batch: Job[]): Promis
       for (const job of batch) job.reply(reply);
       return;
     }
-    // Isolate a failing text so it never takes down unrelated siblings in the same batch.
-    for (const job of batch) {
-      try {
-        const [value] = await translator.translate(route, [{ text: job.text, html: job.html }]);
-        if (value === undefined) {
-          job.reply({ ok: false, error: 'engine-unavailable' });
-        } else {
-          storeTranslation(pair, job.html, job.text, value);
-          job.reply({ ok: true, value });
-        }
-      } catch (itemError) {
-        job.reply(failure(itemError));
+    await translateIndividually(pair, route, batch);
+  }
+}
+
+async function translateIndividually(pair: Pair, route: Pack[], batch: Job[]): Promise<void> {
+  for (const job of batch) {
+    try {
+      const [value] = await translator.translate(route, [{ text: job.text, html: job.html }]);
+      if (value === undefined) {
+        job.reply({ ok: false, error: 'engine-unavailable' });
+      } else {
+        storeTranslation(pair, job.html, job.text, value);
+        job.reply({ ok: true, value });
       }
+    } catch (itemError) {
+      job.reply(failure(itemError));
     }
   }
 }
@@ -198,26 +211,6 @@ chrome.runtime.onMessage.addListener((request: EngineRequest, sender, reply: (re
   const manager = url === chrome.runtime.getURL('packs.html');
   const serviceWorker = !sender.tab && url === chrome.runtime.getURL('background.js');
   const content = Boolean(sender.tab) && !popup && !manager;
-
-  if (request.type === 'engine-translate' && content) {
-    const html = Boolean(request.html);
-    if (typeof request.text !== 'string' || request.text.length > MAX_TRANSLATION_CHARS) {
-      reply({ ok: false, error: 'busy' });
-      return;
-    }
-    const cached = lookupTranslation(request, html, request.text);
-    if (cached !== undefined) {
-      reply({ ok: true, value: cached });
-      return;
-    }
-    if (queue.length >= MAX_QUEUED) {
-      reply({ ok: false, error: 'busy' });
-      return;
-    }
-    queue.push({ pair: request, text: request.text, html, reply });
-    scheduleDrain();
-    return true;
-  }
 
   if (request.type === 'engine-translate-batch' && content) {
     if (!Array.isArray(request.items) || request.items.length === 0 || request.items.length > MAX_BATCH_REQUEST_ITEMS) {

@@ -31,12 +31,13 @@ const DIR_CONTAINERS = new Set([
   'header', 'footer', 'label', 'button', 'select',
 ]);
 
-// Tracks translated DOM fields, inline HTML sentence units, RTL direction overrides, and restoration.
 export class PatchLedger {
   private readonly patches = new Map<Target, Map<Field, Patch>>();
   private readonly inlineUnits = new Map<Element, InlineUnitRecord>();
   private readonly nodeToUnit = new WeakMap<Node, Element>();
   private readonly dirPatches = new Map<Element, string | null>();
+  private readonly dirOwners = new Map<Element, Set<Node>>();
+  private readonly nodeDir = new WeakMap<Node, Element>();
   private readonly attempted = new WeakMap<Target, Map<Field, string>>();
   private readonly busy = new WeakMap<Target, Set<Field>>();
   readonly counts: Counts = { seen: 0, updated: 0, failed: 0 };
@@ -61,6 +62,7 @@ export class PatchLedger {
   forgetField(node: Target, field: Field): void {
     this.attempted.get(node)?.delete(field);
     this.clearBusy(node, field);
+    if (field === 'text') this.releaseDir(node);
     const fields = this.patches.get(node);
     if (fields) {
       fields.delete(field);
@@ -113,7 +115,7 @@ export class PatchLedger {
 
     if (this.targetRtl && field === 'text') {
       const container = dirContainer(node);
-      if (container) this.applyRtlDir(container);
+      if (container) this.retainDir(node, container);
     }
   }
 
@@ -164,7 +166,7 @@ export class PatchLedger {
     record.written = written;
     this.registerUnitNodes(unit, written);
     this.counts.updated++;
-    if (this.targetRtl) this.applyRtlDir(unit.root);
+    if (this.targetRtl) this.retainDir(unit.root, unit.root);
   }
 
   forgetInlineUnit(root: Element, restore: boolean): void {
@@ -175,10 +177,7 @@ export class PatchLedger {
       restoreUnitSnapshot(record.snapshot, record.written);
     }
     this.inlineUnits.delete(root);
-    if (restore && this.dirPatches.has(root)) {
-      restoreDir(root, this.dirPatches.get(root) ?? null);
-      this.dirPatches.delete(root);
-    }
+    this.releaseDir(root);
   }
 
   repairNode(node: Target, allowed: boolean): void {
@@ -189,6 +188,7 @@ export class PatchLedger {
         this.undo(node, field, patch);
         fields.delete(field);
         this.attempted.get(node)?.delete(field);
+        if (field === 'text') this.releaseDir(node);
       }
       if (!fields.size) this.patches.delete(node);
     }
@@ -199,10 +199,7 @@ export class PatchLedger {
       if (unitRecord) {
         this.forgetInlineUnit(unitRecord.unit.root, true);
       }
-      if (isElement(node) && this.dirPatches.has(node)) {
-        restoreDir(node, this.dirPatches.get(node) ?? null);
-        this.dirPatches.delete(node);
-      }
+      if (isElement(node)) this.restoreContainerDir(node);
     }
   }
 
@@ -232,12 +229,43 @@ export class PatchLedger {
       restoreDir(element, previous);
     }
     this.dirPatches.clear();
+    this.dirOwners.clear();
   }
 
-  private applyRtlDir(container: Element): void {
-    if (this.dirPatches.has(container)) return;
-    this.dirPatches.set(container, container.getAttribute('dir'));
-    container.setAttribute('dir', 'auto');
+  private retainDir(owner: Node, container: Element): void {
+    const previousContainer = this.nodeDir.get(owner);
+    if (previousContainer === container) return;
+    if (previousContainer) this.releaseDir(owner);
+    this.nodeDir.set(owner, container);
+    let owners = this.dirOwners.get(container);
+    if (!owners) {
+      owners = new Set();
+      this.dirOwners.set(container, owners);
+      this.dirPatches.set(container, container.getAttribute('dir'));
+      container.setAttribute('dir', 'auto');
+    }
+    owners.add(owner);
+  }
+
+  private releaseDir(owner: Node): void {
+    const container = this.nodeDir.get(owner);
+    if (!container) return;
+    this.nodeDir.delete(owner);
+    const owners = this.dirOwners.get(container);
+    owners?.delete(owner);
+    if (!owners?.size) this.restoreContainerDir(container);
+  }
+
+  private restoreContainerDir(container: Element): void {
+    if (!this.dirPatches.has(container)) return;
+    const previous = this.dirPatches.get(container) ?? null;
+    this.dirPatches.delete(container);
+    const owners = this.dirOwners.get(container);
+    if (owners) {
+      for (const owner of owners) this.nodeDir.delete(owner);
+      this.dirOwners.delete(container);
+    }
+    restoreDir(container, previous);
   }
 
   private registerUnitNodes(unit: InlineUnit, written: WrittenUnitState): void {

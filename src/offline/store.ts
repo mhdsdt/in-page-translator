@@ -49,7 +49,6 @@ export async function installedPacks(): Promise<Set<string>> {
   const keys = await transact('readwrite', store => {
     const request = store.getAllKeys();
     request.onsuccess = () => {
-      // Older catalog revisions are no longer usable by this build.
       for (const key of request.result) {
         if (typeof key !== 'string' || !current.has(key)) store.delete(key);
       }
@@ -67,7 +66,6 @@ export function readPack(pack: Pack): Promise<ModelBuffers | undefined> {
 }
 
 export async function writePack(pack: Pack, buffers: ModelBuffers): Promise<void> {
-  // One transaction publishes the entire verified pack. Partial downloads never appear installed.
   await transact('readwrite', store => store.put(buffers, packKey(pack)));
 }
 

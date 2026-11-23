@@ -9,6 +9,7 @@ import { canStartPage, derivePopupView, needsPacksForRoute, resolveSource } from
 import type { ActionKind, Tone } from './view';
 
 const MAX_RECENT_TARGETS = 3;
+const DETECT_LANGUAGE_TIMEOUT_MS = 2_000;
 
 const source = document.querySelector<HTMLSelectElement>('#source')!;
 const target = document.querySelector<HTMLSelectElement>('#target')!;
@@ -242,8 +243,7 @@ function detectSource(page: PageState): void {
     detection = 'done';
     render();
   };
-  // Some pages never return a language. Leave the manual choice available throughout.
-  const timeout = window.setTimeout(finish, 2_000);
+  const timeout = window.setTimeout(finish, DETECT_LANGUAGE_TIMEOUT_MS);
   void chrome.tabs.detectLanguage(address.tabId)
     .then(code => { detected = normalizeLanguage(code); })
     .catch(() => {})

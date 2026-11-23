@@ -7,7 +7,6 @@ const LOOKAHEAD_PX = 250;
 const boxVisibility = { opacityProperty: true, contentVisibilityAuto: true };
 const fullVisibility = { ...boxVisibility, visibilityProperty: true };
 
-// The browser computes clipping through nested scrollers and same-origin frames.
 export class Viewport {
   private readonly targets = new Map<Element, Set<Target>>();
   private readonly owners = new WeakMap<Target, Element>();
@@ -73,8 +72,6 @@ export class Viewport {
     this.observer.unobserve(element);
   }
 
-  // A tall parent can stay in view while different text inside it scrolls past.
-  // Get fresh clipping rectangles only for intersecting parents with unseen text.
   readonly refresh = (): void => {
     if (this.signal.aborted || this.deferredFrame !== undefined || !this.deferred.size) return;
     this.deferredFrame = window.requestAnimationFrame(() => {
@@ -133,7 +130,6 @@ export class Viewport {
       this.targets.set(element, group);
       this.observer.observe(element);
     } else {
-      // Its last observation may already have been delivered.
       this.deferred.add(element);
       this.refresh();
     }
